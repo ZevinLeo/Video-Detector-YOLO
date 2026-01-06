@@ -1,0 +1,31 @@
+# --- Python 垃圾文件 ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- VS Code 配置 (个人配置不用传) ---
+.vscode/
+
+# --- PyInstaller 生成的打包垃圾 (非常重要！) ---
+build/
+dist/
+*.spec
+
+# --- 虚拟环境 (千万别传这个！) ---
+venv/
+env/
+.env
+.venv
+# 如果你的 conda 环境建在项目里了，把它的名字也加进来
+
+# --- 用户产生的图片/视频 ---
+*.mp4
+*.avi
+*.jpg
+*.png
+# 如果你想保留测试用的几张图，可以把上面这几行删掉
+
+# --- AI 模型 (可选) ---
+# yolov8n-pose.pt 只有 6MB，传上去没事。
+# 但如果你以后用了几百 MB 的大模型，就把下面这行取消注释
+# models/*.pt
