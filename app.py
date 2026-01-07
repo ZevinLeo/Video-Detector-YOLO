@@ -10,7 +10,13 @@ import time
 import sys
 
 # =========================================================================
-# 模块 1: AI 智能引擎
+# 常量定义
+# =========================================================================
+CHECKED_ICON = "☑"
+UNCHECKED_ICON = "☐"
+
+# =========================================================================
+# 模块 1: AI 智能引擎 (保持不变)
 # =========================================================================
 
 class YoloDetector:
@@ -26,7 +32,6 @@ class YoloDetector:
         self._check_environment_immediate()
 
     def _check_environment_immediate(self):
-        """启动即运行的快速环境检测"""
         try:
             if torch.cuda.is_available():
                 torch.backends.cudnn.benchmark = True
@@ -61,6 +66,7 @@ class YoloDetector:
             
             for name in (current_keys - target_keys):
                 del self.models[name]
+                print(f"已卸载: {name}")
                 
             for name in (target_keys - current_keys):
                 path = os.path.join(self.model_dir, name)
@@ -68,6 +74,7 @@ class YoloDetector:
                 if os.path.exists(path):
                     model = YOLO(path)
                     self.models[name] = model
+                    print(f"已加载: {name}")
                 else:
                     print(f"❌ 找不到: {name}")
 
@@ -107,7 +114,7 @@ class YoloDetector:
         return has_target, annotated_frame
 
 # =========================================================================
-# 模块 2: 核心逻辑层
+# 模块 2: 核心逻辑层 (保持不变)
 # =========================================================================
 
 class FileManager:
@@ -197,13 +204,13 @@ class VideoProcessor:
         return frames_data, ratio
 
 # =========================================================================
-# 模块 3: 全功能 UI
+# 模块 3: 全功能 UI (重点修改部分)
 # =========================================================================
 
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("YOLO 智能视频筛选器 v3.1 - 增量筛选版")
+        self.root.title("YOLO 智能视频筛选器 v3.5 - 视觉交互优化版")
         self.root.geometry("1400x950")
         
         self.current_filepath = None
@@ -248,7 +255,7 @@ class UnifiedApp:
         top_frame = tk.Frame(self.root, pady=10)
         top_frame.pack(fill=tk.X)
         
-        # 1. 扫描
+        # --- 区域 1: 扫描 ---
         path_group = tk.LabelFrame(top_frame, text="1. 扫描设置", padx=10, pady=5)
         path_group.pack(side=tk.LEFT, padx=10, fill=tk.Y)
         self.path_var = tk.StringVar()
@@ -259,10 +266,11 @@ class UnifiedApp:
         self.btn_scan = tk.Button(path_group, text="🔍 扫描", command=self.search_files, bg="#4CAF50", fg="white", font=("Arial", 9, "bold"))
         self.btn_scan.pack(side=tk.LEFT, padx=5)
 
-        # 2. AI
+        # --- 区域 2: AI 参数 ---
         ai_group = tk.LabelFrame(top_frame, text="2-4. AI 智能参数", padx=10, pady=5)
         ai_group.pack(side=tk.LEFT, padx=10, fill=tk.Y)
         
+        # 行1
         f_row1 = tk.Frame(ai_group)
         f_row1.pack(side=tk.TOP, fill=tk.X, pady=2)
         self.btn_manage_models = tk.Button(f_row1, text="⚙️ 模型与类别管理", command=self.open_model_manager, bg="#E3F2FD", font=("Arial", 9, "bold"))
@@ -270,6 +278,7 @@ class UnifiedApp:
         self.lbl_model_status = tk.Label(f_row1, text="已选: 0", fg="gray")
         self.lbl_model_status.pack(side=tk.LEFT)
 
+        # 行2
         f_row2 = tk.Frame(ai_group)
         f_row2.pack(side=tk.TOP, fill=tk.X, pady=5)
         tk.Label(f_row2, text="帧数:").pack(side=tk.LEFT)
@@ -283,6 +292,7 @@ class UnifiedApp:
         self.spin_conf = tk.Spinbox(f_row2, textvariable=self.conf_var, from_=0.01, to=0.95, increment=0.01, width=4, format="%.2f")
         self.spin_conf.pack(side=tk.LEFT)
 
+        # 行3
         f_row3 = tk.Frame(ai_group)
         f_row3.pack(side=tk.TOP, fill=tk.X, pady=5)
         self.draw_labels_var = tk.BooleanVar(value=True)
@@ -296,7 +306,7 @@ class UnifiedApp:
         self.btn_stop = tk.Button(f_row3, text="⏹", command=self.stop_task, state=tk.DISABLED, bg="#ffcccb", width=3)
         self.btn_stop.pack(side=tk.LEFT, padx=2)
 
-        # 3. 筛选
+        # --- 区域 3: 筛选 ---
         del_group = tk.LabelFrame(top_frame, text="5. 结果处理", padx=10, pady=5, fg="red")
         del_group.pack(side=tk.LEFT, padx=10, fill=tk.Y)
         
@@ -308,11 +318,9 @@ class UnifiedApp:
         self.entry_thresh.pack(side=tk.LEFT, padx=2)
         tk.Label(f_del1, text="%").pack(side=tk.LEFT)
         
-        # [修改] 增量勾选按钮
         self.btn_reselect = tk.Button(f_del1, text="⚡增量筛选", command=self.apply_threshold_selection, bg="#FF9800", fg="white")
         self.btn_reselect.pack(side=tk.LEFT, padx=5)
         
-        # [新增] 清空按钮
         self.btn_clear_sel = tk.Button(f_del1, text="❌ 清空", command=self.clear_all_selection, width=6)
         self.btn_clear_sel.pack(side=tk.LEFT, padx=2)
 
@@ -323,24 +331,35 @@ class UnifiedApp:
         self.btn_del_folders = tk.Button(f_del2, text="📂 删文件夹", command=self.delete_selected_folders, bg="#D32F2F", fg="white")
         self.btn_del_folders.pack(side=tk.LEFT, padx=5)
 
-        # 主界面
+        # --- 主内容区 ---
         paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
         list_frame = tk.Frame(paned)
         paned.add(list_frame, width=600)
         cols = ("checkbox", "filename", "ai_score", "folder", "full_path")
         self.tree = ttk.Treeview(list_frame, columns=cols, show='headings')
+        
+        # 优化列显示：checkbox 列居中
         headers = [("✓", 40), ("文件名", 200), ("出现率", 80), ("父文件夹", 120), ("完整路径", 150)]
-        for col, (txt, w) in zip(cols, headers):
+        self.tree.heading("checkbox", text="✓")
+        self.tree.column("checkbox", width=40, anchor="center") # 居中对齐
+        
+        for col, (txt, w) in zip(cols[1:], headers[1:]):
             self.tree.heading(col, text=txt)
             self.tree.column(col, width=w)
+            
         scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscroll=scroll.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
-        self.tree.bind("<Button-1>", self.on_tree_click)
-        self.tree.bind("<Button-1>", self.on_header_click, add="+")
+        
+        # === 关键修改：事件绑定 ===
+        # 1. 选中行触发预览 (包括键盘上下键)
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select_preview)
+        
+        # 2. 鼠标抬起事件 (处理点击勾选逻辑)
+        self.tree.bind("<ButtonRelease-1>", self.on_tree_click_release)
 
         # 预览
         self.preview_frame = tk.Frame(paned, bg="#eeeeee")
@@ -365,7 +384,7 @@ class UnifiedApp:
         self.progress = ttk.Progressbar(bottom_bar, mode='determinate')
         self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20)
 
-    # ----------------- 弹窗管理逻辑 -----------------
+    # ----------------- 弹窗管理逻辑 (保持不变) -----------------
 
     def open_model_manager(self):
         top = tk.Toplevel(self.root)
@@ -375,7 +394,6 @@ class UnifiedApp:
         paned = tk.PanedWindow(top, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # 左侧
         frame_left = tk.LabelFrame(paned, text="1. 模型库 (勾选加载)", padx=5, pady=5)
         paned.add(frame_left, width=300)
         canvas_l = tk.Canvas(frame_left)
@@ -387,7 +405,6 @@ class UnifiedApp:
         canvas_l.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll_l.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # 右侧
         frame_right = tk.LabelFrame(paned, text="2. 类别筛选 (配置选中模型的类别)", padx=5, pady=5)
         paned.add(frame_right, width=500)
         self.lbl_right_header = tk.Label(frame_right, text="请先在左侧点击模型名称...", font=("Arial", 10, "bold"), fg="gray")
@@ -622,9 +639,9 @@ class UnifiedApp:
         self.root.after(0, self._set_ui_state_idle)
 
     def _add_item(self, root, file):
-        item_id = self.tree.insert('', 'end', values=("", file, "--", os.path.basename(root), os.path.join(root, file)))
+        # 默认使用 UNCHECKED_ICON
+        item_id = self.tree.insert('', 'end', values=(UNCHECKED_ICON, file, "--", os.path.basename(root), os.path.join(root, file)))
         self.checkbox_vars[item_id] = tk.BooleanVar(value=False)
-        self.update_checkbox_display(item_id)
 
     def start_batch_ai_scan(self):
         if not self.selected_models:
@@ -637,8 +654,8 @@ class UnifiedApp:
         except: scan_frames = 3
         draw_labels = self.draw_labels_var.get()
         
-        model_str = "\n  - ".join(self.selected_models)
-        if not messagebox.askyesno("确认运行", f"将使用以下模型检测：\n  - {model_str}\n\n标注: {'开启' if draw_labels else '关闭'}"): return
+        model_str = "\n   - ".join(self.selected_models)
+        if not messagebox.askyesno("确认运行", f"将使用以下模型检测：\n   - {model_str}\n\n标注: {'开启' if draw_labels else '关闭'}"): return
 
         self.stop_flag = False
         self.pause_event.set()
@@ -682,12 +699,15 @@ class UnifiedApp:
     def _update_ai_result(self, iid, ratio, check):
         if not self.tree.exists(iid): return 
         vals = self.tree.item(iid, 'values')
-        self.tree.item(iid, values=(vals[0], vals[1], f"{ratio:.1f}%", vals[3], vals[4]))
+        # 保持第一列为当前视觉状态
+        current_icon = vals[0]
+        self.tree.item(iid, values=(current_icon, vals[1], f"{ratio:.1f}%", vals[3], vals[4]))
+        
+        # 自动勾选逻辑（如果你希望 AI 自动勾选，也要同步更新图标）
         self.checkbox_vars[iid].set(check)
         self.update_checkbox_display(iid)
 
     def apply_threshold_selection(self):
-        """[核心] 增量勾选：只增加符合条件的，不取消已选的"""
         try: thresh = self.threshold_var.get()
         except: return
         count_new = 0
@@ -697,7 +717,6 @@ class UnifiedApp:
             if "%" in score_str:
                 try:
                     score = float(score_str.replace("%", ""))
-                    # 只有当 score < thresh 且当前没选时，才把它加上
                     if score < thresh:
                         if not self.checkbox_vars[iid].get():
                             self.checkbox_vars[iid].set(True)
@@ -707,11 +726,9 @@ class UnifiedApp:
                     if self.checkbox_vars[iid].get():
                         count_total += 1
                 except: pass
-        
         self.status_var.set(f"当前已选 {count_total} 个 (本次新增 {count_new} 个)")
 
     def clear_all_selection(self):
-        """清空所有勾选"""
         for iid in self.checkbox_vars:
             self.checkbox_vars[iid].set(False)
             self.update_checkbox_display(iid)
@@ -785,29 +802,68 @@ class UnifiedApp:
             self.btn_pause.config(text="⏸", bg="SystemButtonFace")
             self.status_var.set("任务继续执行中...")
 
-    def on_tree_click(self, event):
-        if self.tree.identify_region(event.x, event.y) == "cell":
-            if self.tree.identify_column(event.x) == "#1":
-                iid = self.tree.identify_row(event.y)
-                self.checkbox_vars[iid].set(not self.checkbox_vars[iid].get())
-                self.update_checkbox_display(iid)
-
-    def on_header_click(self, event):
-        if self.tree.identify_column(event.x) == "#1":
-            state = not any(v.get() for v in self.checkbox_vars.values())
-            for v in self.checkbox_vars.values(): v.set(state)
-            for iid in self.checkbox_vars: self.update_checkbox_display(iid)
+    # =========================================================
+    # 核心修复区：新的点击判定逻辑
+    # =========================================================
+    
+    def on_tree_click_release(self, event):
+        """鼠标抬起时触发，精准判断点击了哪里"""
+        region = self.tree.identify("region", event.x, event.y)
+        column = self.tree.identify_column(event.x)
+        
+        # 1. 判定表头点击 (Heading)
+        if region == "heading":
+            if column == "#1": # 只有点第一列的表头才全选
+                # 检查当前是否全选了
+                all_checked = all(v.get() for v in self.checkbox_vars.values())
+                new_state = not all_checked # 反转状态
+                
+                for iid, var in self.checkbox_vars.items():
+                    var.set(new_state)
+                    self.update_checkbox_display(iid)
+        
+        # 2. 判定单元格点击 (Cell)
+        elif region == "cell":
+            row_id = self.tree.identify_row(event.y)
+            if not row_id: return
+            
+            if column == "#1": # 只有点第一列才切换勾选
+                current_val = self.checkbox_vars[row_id].get()
+                self.checkbox_vars[row_id].set(not current_val)
+                self.update_checkbox_display(row_id)
+            else:
+                # 点击其他列：不做勾选操作
+                # (Treeview 原生机制会自动处理选中行，并触发 <<TreeviewSelect>> 进行预览)
+                pass
 
     def update_checkbox_display(self, iid):
+        """根据 checkbox_vars 的状态更新图标"""
+        if iid not in self.checkbox_vars: return
         v = self.checkbox_vars[iid].get()
         vals = self.tree.item(iid, 'values')
-        self.tree.item(iid, values=("✓" if v else "",) + vals[1:], tags=('checked_item' if v else 'normal_item',))
+        
+        # 使用常量图标
+        icon = CHECKED_ICON if v else UNCHECKED_ICON
+        
+        # 更新第一列，保持其他列不变
+        new_vals = (icon,) + vals[1:]
+        
+        # 同时应用背景色样式
+        tag = 'checked_item' if v else 'normal_item'
+        self.tree.item(iid, values=new_vals, tags=(tag,))
 
-    def on_tree_select(self, event):
+    def on_tree_select_preview(self, event):
+        """
+        专门处理预览逻辑。
+        无论是鼠标点击行(非勾选列)，还是键盘上下键，都会触发此事件。
+        """
         sel = self.tree.selection()
         if not sel: return
-        path = self.tree.item(sel[-1], 'values')[4]
+        path = self.tree.item(sel[-1], 'values')[4] # 假设路径在第5列
+        
+        # 避免重复加载同一文件
         if self.current_filepath == path: return
+        
         self.current_filepath = path
         threading.Thread(target=self._preview_thread, args=(path,), daemon=True).start()
 
