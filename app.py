@@ -23,35 +23,41 @@ class YoloDetector:
         if not os.path.exists(self.model_dir):
             os.makedirs(self.model_dir)
             
-    def load_models(self, target_model_names):
+        self._check_environment_immediate()
+
+    def _check_environment_immediate(self):
         try:
-            from ultralytics import YOLO
             if torch.cuda.is_available():
                 torch.backends.cudnn.benchmark = True
                 self.device = 'cuda'
                 gpu_name = torch.cuda.get_device_name(0)
-                self.gpu_info = f"🚀 {gpu_name} | CUDA加速中"
+                self.gpu_info = f"🚀 {gpu_name} | CUDA Ready"
             else:
                 self.device = 'cpu'
-                self.gpu_info = "🐢 CPU 模式 (建议使用N卡)"
+                self.gpu_info = "🐢 CPU 模式 (未检测到NVIDIA显卡)"
+        except Exception as e:
+            self.gpu_info = f"⚠️ 环境异常: {str(e)}"
 
+    def load_models(self, target_model_names):
+        try:
+            from ultralytics import YOLO
             current_keys = set(self.models.keys())
             target_keys = set(target_model_names)
             
             for name in (current_keys - target_keys):
                 del self.models[name]
                 
-            loaded_count = 0
             for name in (target_keys - current_keys):
                 path = os.path.join(self.model_dir, name)
                 if not os.path.exists(path): path = name
                 if os.path.exists(path):
                     model = YOLO(path)
                     self.models[name] = model
-                    loaded_count += 1
+                else:
+                    print(f"❌ 找不到模型: {name}")
 
             if self.models:
-                return True, f"{self.gpu_info} | 已加载 {len(self.models)} 个模型"
+                return True, f"{self.gpu_info} | 加载: {len(self.models)}"
             else:
                 return False, "未加载任何模型"
         except Exception as e:
@@ -76,7 +82,7 @@ class YoloDetector:
         return has_target, annotated_frame
 
 # =========================================================================
-# 模块 2: 核心逻辑层 (保持不变)
+# 模块 2: 核心逻辑层
 # =========================================================================
 
 class FileManager:
@@ -141,52 +147,46 @@ class VideoProcessor:
             has_target, annotated_frame = self.detector.process_frame(frame, conf_threshold=ai_conf, draw=draw_skeleton)
             if has_target: target_detected_count += 1
             
-            img_tk = self._resize_for_tk(annotated_frame, target_width, count)
+            # [修改] 这里不再预先缩放成很小的图，而是转为 PIL 对象保存
+            # 为了内存考虑，可以先缩放到一个中等尺寸（比如宽度 800），防止原图 4K 太大
+            h, w = annotated_frame.shape[:2]
+            scale = 800 / w if w > 800 else 1
+            if scale != 1:
+                annotated_frame = cv2.resize(annotated_frame, (int(w*scale), int(h*scale)))
+            
+            img_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+            img_pil = Image.fromarray(img_rgb) # 保存 PIL 对象，方便 UI 层做动态缩放
+            
             time_sec = idx / fps if fps else 0
             time_str = f"{int(time_sec//60):02d}:{int(time_sec%60):02d}"
             
             frames_data.append({
                 "label": f"第{i+1}帧",
                 "time": time_str,
-                "img_tk": img_tk,
+                "pil_img": img_pil, # 核心：存 PIL 对象
                 "has_target": has_target
             })
         cap.release()
         ratio = (target_detected_count / len(frames_data)) * 100 if frames_data else 0.0
         return frames_data, ratio
 
-    def _resize_for_tk(self, frame_bgr, target_width, grid_count):
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        height, width = frame_rgb.shape[:2]
-        is_narrow_mode = target_width < 380 
-        
-        if is_narrow_mode or grid_count <= 1: max_w = int(target_width * 0.95)
-        elif grid_count <= 4:  max_w = int(target_width * 0.46)
-        elif grid_count <= 9:  max_w = int(target_width * 0.30)
-        elif grid_count <= 16: max_w = int(target_width * 0.22)
-        elif grid_count <= 25: max_w = int(target_width * 0.18)
-        else:                  max_w = int(target_width * 0.15)
-
-        max_w = min(max_w, 500) 
-        max_h = int(max_w * 0.75)
-        scale = min(max_w/width, max_h/height)
-        new_w, new_h = int(width * scale), int(height * scale)
-        img = Image.fromarray(frame_rgb)
-        return ImageTk.PhotoImage(img.resize((new_w, new_h), Image.Resampling.LANCZOS))
-
 # =========================================================================
-# 模块 3: 全功能 UI (升级: 交互体验优化)
+# 模块 3: 全功能 UI (升级: 动态铺满布局)
 # =========================================================================
 
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("YOLO 智能视频筛选器 v2.2 - 专业版")
-        self.root.geometry("1400x950") # 稍微加大高度
+        self.root.title("YOLO 智能视频筛选器 v2.4 - 自适应铺满版")
+        self.root.geometry("1400x950")
         
         self.current_filepath = None
         self.checkbox_vars = {}
         self.model_select_vars = {} 
+        
+        # 缓存
+        self.cached_preview_data = [] 
+        self.cached_ratio = 0.0
         
         self.pause_event = threading.Event()
         self.pause_event.set()
@@ -200,9 +200,11 @@ class UnifiedApp:
         self._init_ui()
         self._configure_styles()
         self._scan_models()
+        
+        # 绑定重绘事件
+        self.preview_canvas.bind("<Configure>", self._on_window_resize)
 
     def _scan_models(self):
-        """扫描并填充下拉菜单"""
         if not os.path.exists("models"): os.makedirs("models")
         model_files = [f for f in os.listdir("models") if f.endswith(".pt")]
         
@@ -217,10 +219,7 @@ class UnifiedApp:
         for f in model_files:
             var = tk.BooleanVar(value=False)
             self.model_select_vars[f] = var
-            self.menu_models.add_checkbutton(
-                label=f, variable=var, onvalue=True, offvalue=False,
-                command=self._on_model_check
-            )
+            self.menu_models.add_checkbutton(label=f, variable=var, onvalue=True, offvalue=False, command=self._on_model_check)
             
         if model_files:
             self.model_select_vars[model_files[0]].set(True)
@@ -229,7 +228,7 @@ class UnifiedApp:
     def _on_model_check(self):
         selected = [name for name, var in self.model_select_vars.items() if var.get()]
         if len(selected) > 3:
-            messagebox.showwarning("限制", "为保证性能，最多只能同时勾选 3 个模型！")
+            messagebox.showwarning("限制", "最多只能同时勾选 3 个模型！")
             count = 0
             for name, var in self.model_select_vars.items():
                 if var.get():
@@ -249,14 +248,12 @@ class UnifiedApp:
         self.tree.tag_configure('normal_item', background='white', foreground='black')
 
     def _init_ui(self):
-        # 顶部容器
         top_frame = tk.Frame(self.root, pady=10)
         top_frame.pack(fill=tk.X)
         
-        # --- 区域 1: 扫描区 (左侧) ---
+        # 1. 扫描
         path_group = tk.LabelFrame(top_frame, text="1. 扫描设置", padx=10, pady=5)
         path_group.pack(side=tk.LEFT, padx=10, fill=tk.Y)
-        
         self.path_var = tk.StringVar()
         self.entry_path = tk.Entry(path_group, textvariable=self.path_var, width=18)
         self.entry_path.pack(side=tk.LEFT, padx=2)
@@ -265,79 +262,47 @@ class UnifiedApp:
         self.btn_scan = tk.Button(path_group, text="🔍 扫描", command=self.search_files, bg="#4CAF50", fg="white", font=("Arial", 9, "bold"))
         self.btn_scan.pack(side=tk.LEFT, padx=5)
 
-        # --- 区域 2: AI 参数与控制 (中间核心) ---
+        # 2. AI
         ai_group = tk.LabelFrame(top_frame, text="2-4. AI 智能参数", padx=10, pady=5)
         ai_group.pack(side=tk.LEFT, padx=10, fill=tk.Y)
         
-        # 行1: 模型与帧数
         f_row1 = tk.Frame(ai_group)
         f_row1.pack(side=tk.TOP, fill=tk.X, pady=2)
-        
         tk.Label(f_row1, text="模型:").pack(side=tk.LEFT)
         self.mb_models = tk.Menubutton(f_row1, text="选择模型", relief=tk.RAISED, bg="#f0f0f0", width=12)
         self.menu_models = tk.Menu(self.mb_models, tearoff=0)
         self.mb_models.config(menu=self.menu_models)
         self.mb_models.pack(side=tk.LEFT, padx=5)
-
         tk.Label(f_row1, text="帧数:").pack(side=tk.LEFT, padx=(10,0))
         self.preview_count_var = tk.StringVar(value="3")
         self.combo_frames = ttk.Combobox(f_row1, textvariable=self.preview_count_var, values=[str(i) for i in range(1, 31)], width=3)
         self.combo_frames.pack(side=tk.LEFT, padx=5)
 
-        # 行2: 灵敏度 (精准控制条)
         f_row2 = tk.Frame(ai_group)
         f_row2.pack(side=tk.TOP, fill=tk.X, pady=5)
-        
         tk.Label(f_row2, text="灵敏度:").pack(side=tk.LEFT)
-        
-        # [人性化] 联动变量: Slider 和 Spinbox 共享一个 DoubleVar
         self.conf_var = tk.DoubleVar(value=0.15)
-        
-        # 1. 滑块 (更长，更宽)
-        self.conf_scale = tk.Scale(
-            f_row2, 
-            variable=self.conf_var, 
-            from_=0.01, to=0.95, resolution=0.01, 
-            orient=tk.HORIZONTAL, 
-            length=120, # 变长
-            width=15,   # 变宽
-            showvalue=0 # 不在滑块上方显示数字，因为右边有框
-        )
+        self.conf_scale = tk.Scale(f_row2, variable=self.conf_var, from_=0.01, to=0.95, resolution=0.01, orient=tk.HORIZONTAL, length=120, width=15, showvalue=0)
         self.conf_scale.pack(side=tk.LEFT, padx=5)
-        
-        # 2. 数字微调框 (精准输入)
-        self.spin_conf = tk.Spinbox(
-            f_row2, 
-            textvariable=self.conf_var, 
-            from_=0.01, to=0.95, increment=0.01,
-            width=4, format="%.2f"
-        )
+        self.spin_conf = tk.Spinbox(f_row2, textvariable=self.conf_var, from_=0.01, to=0.95, increment=0.01, width=4, format="%.2f")
         self.spin_conf.pack(side=tk.LEFT)
 
-        # 行3: 绘图与操作按钮
         f_row3 = tk.Frame(ai_group)
         f_row3.pack(side=tk.TOP, fill=tk.X, pady=5)
-        
         self.draw_skeleton_var = tk.BooleanVar(value=True)
         self.chk_draw = tk.Checkbutton(f_row3, text="显示标注", variable=self.draw_skeleton_var)
         self.chk_draw.pack(side=tk.LEFT)
-        
-        tk.Frame(f_row3, width=20).pack(side=tk.LEFT) # 占位符
-
+        tk.Frame(f_row3, width=20).pack(side=tk.LEFT)
         self.btn_start_ai = tk.Button(f_row3, text="▶ 运行", command=self.start_batch_ai_scan, bg="#2196F3", fg="white", font=("Arial", 9, "bold"), width=8)
         self.btn_start_ai.pack(side=tk.LEFT, padx=2)
-        
-        # 小按钮：暂停/停止
         self.btn_pause = tk.Button(f_row3, text="⏸", command=self.toggle_pause, state=tk.DISABLED, width=3)
         self.btn_pause.pack(side=tk.LEFT, padx=2)
         self.btn_stop = tk.Button(f_row3, text="⏹", command=self.stop_task, state=tk.DISABLED, bg="#ffcccb", width=3)
         self.btn_stop.pack(side=tk.LEFT, padx=2)
 
-        # --- 区域 3: 筛选与删除 (右侧) ---
+        # 3. 筛选
         del_group = tk.LabelFrame(top_frame, text="5. 结果处理", padx=10, pady=5, fg="red")
         del_group.pack(side=tk.LEFT, padx=10, fill=tk.Y)
-
-        # 阈值
         f_del1 = tk.Frame(del_group)
         f_del1.pack(side=tk.TOP, pady=5)
         tk.Label(f_del1, text="出现率 <").pack(side=tk.LEFT)
@@ -347,8 +312,6 @@ class UnifiedApp:
         tk.Label(f_del1, text="%").pack(side=tk.LEFT)
         self.btn_reselect = tk.Button(f_del1, text="⚡一键勾选", command=self.apply_threshold_selection, bg="#FF9800", fg="white")
         self.btn_reselect.pack(side=tk.LEFT, padx=5)
-
-        # 动作
         f_del2 = tk.Frame(del_group)
         f_del2.pack(side=tk.TOP, pady=5)
         self.btn_del_files = tk.Button(f_del2, text="🗑 删文件", command=self.delete_selected_files, bg="#f44336", fg="white")
@@ -356,7 +319,7 @@ class UnifiedApp:
         self.btn_del_folders = tk.Button(f_del2, text="📂 删文件夹", command=self.delete_selected_folders, bg="#D32F2F", fg="white")
         self.btn_del_folders.pack(side=tk.LEFT, padx=5)
 
-        # --- 主界面 ---
+        # 主界面
         paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -382,39 +345,108 @@ class UnifiedApp:
         self.preview_canvas = tk.Canvas(self.preview_frame, bg="#eeeeee")
         self.preview_scroll = tk.Scrollbar(self.preview_frame, orient="vertical", command=self.preview_canvas.yview)
         self.preview_content = tk.Frame(self.preview_canvas, bg="#eeeeee")
-        self.preview_canvas.create_window((0,0), anchor="nw", window=self.preview_content)
+        self.preview_win = self.preview_canvas.create_window((0,0), anchor="nw", window=self.preview_content)
         self.preview_content.bind("<Configure>", lambda e: self.preview_canvas.configure(scrollregion=self.preview_canvas.bbox("all")))
-        self.preview_canvas.bind("<Configure>", lambda e: self.preview_canvas.itemconfig(self.preview_canvas.find_all()[0], width=self.preview_canvas.winfo_width()))
         self.preview_canvas.pack(side="left", fill="both", expand=True)
         self.preview_scroll.pack(side="right", fill="y")
         self.preview_canvas.configure(yscrollcommand=self.preview_scroll.set)
 
-        # --- 底部状态栏 ---
+        # 状态栏
         bottom_bar = tk.Frame(self.root, bd=1, relief=tk.SUNKEN)
         bottom_bar.pack(side=tk.BOTTOM, fill=tk.X)
-        self.gpu_status_var = tk.StringVar(value="正在检测环境...")
-        tk.Label(bottom_bar, textvariable=self.gpu_status_var, fg="#2E7D32", font=("Segoe UI", 9, "bold"), padx=10).pack(side=tk.LEFT)
+        self.gpu_status_var = tk.StringVar(value=self.detector.gpu_info)
+        status_color = "#2E7D32" if "🚀" in self.detector.gpu_info else "black"
+        tk.Label(bottom_bar, textvariable=self.gpu_status_var, fg=status_color, font=("Segoe UI", 9, "bold"), padx=10).pack(side=tk.LEFT)
         self.status_var = tk.StringVar(value="准备就绪")
         tk.Label(bottom_bar, textvariable=self.status_var, padx=10).pack(side=tk.RIGHT)
         self.progress = ttk.Progressbar(bottom_bar, mode='determinate')
         self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20)
 
+    # ----------------- 响应式布局核心逻辑 (修改重点) -----------------
+
+    def _on_window_resize(self, event):
+        self.preview_canvas.itemconfig(self.preview_win, width=event.width)
+        self._reflow_grid(event.width)
+
+    def _reflow_grid(self, container_width):
+        """
+        [算法] 动态计算列数和图片大小，以最大程度铺满屏幕
+        """
+        if not self.cached_preview_data: return
+        
+        # 清除现有布局
+        for widget in self.preview_content.winfo_children():
+            widget.destroy()
+
+        # Header
+        tk.Label(self.preview_content, text=f"出现率: {self.cached_ratio:.1f}%", font=("bold",12), bg="#eeeeee").pack(pady=(10,5))
+        f_container = tk.Frame(self.preview_content, bg="#eeeeee")
+        f_container.pack(fill=tk.X, padx=5)
+
+        count = len(self.cached_preview_data)
+        if count == 0: return
+
+        # 1. 智能计算列数 (Cols)
+        # 策略：根据图片数量决定列数，尽量让图片大一点
+        # 1张图 -> 1列 (最大)
+        # 2-4张 -> 2列
+        # 5-9张 -> 3列
+        # 10+张 -> 4列
+        # 同时要考虑屏幕太窄的情况
+        if container_width < 400: cols = 1
+        elif count == 1: cols = 1
+        elif count <= 4: cols = 2
+        elif count <= 9: cols = 3
+        else: cols = 4
+
+        # 2. 计算每张图的确切宽度 (Pixel Width)
+        # 容器宽 - (列数+1)*间隙 / 列数
+        padding = 10
+        item_w = int((container_width - (cols + 1) * padding) / cols)
+        # 限制最小宽度，防止太窄
+        if item_w < 100: 
+            item_w = 100
+            cols = max(1, int((container_width - padding) / (item_w + padding)))
+
+        # 3. 实时缩放并布局
+        for i, d in enumerate(self.cached_preview_data):
+            f = tk.Frame(f_container, bd=1, relief="solid", padx=2, pady=2, bg="white")
+            f.grid(row=i//cols, column=i%cols, padx=5, pady=5, sticky="nsew")
+            
+            # 使用 PIL 的 resize 进行高质量缩放
+            pil_img = d['pil_img']
+            w, h = pil_img.size
+            # 计算等比高度
+            item_h = int(item_w * h / w)
+            
+            # 缩放 (LANCZOS 质量最好)
+            resized_pil = pil_img.resize((item_w, item_h), Image.Resampling.LANCZOS)
+            tk_img = ImageTk.PhotoImage(resized_pil)
+            
+            # 显示
+            l = tk.Label(f, image=tk_img, bg="white")
+            l.image = tk_img # 必须保留引用，否则图片不显示
+            l.pack()
+            
+            tk.Label(f, text=f"{d['label']} ({d['time']})", bg="white").pack()
+            
+        # 让 Grid 列宽自动拉伸
+        for c in range(cols):
+            f_container.grid_columnconfigure(c, weight=1)
+
     # ----------------- 逻辑控制 -----------------
 
     def _toggle_inputs(self, enable):
         state = tk.NORMAL if enable else tk.DISABLED
-        # 扫描区
         self.btn_select.config(state=state)
         self.btn_scan.config(state=state)
         self.entry_path.config(state=state)
-        # AI区
         self.mb_models.config(state=state) 
         self.combo_frames.config(state="readonly" if enable else tk.DISABLED)
         self.conf_scale.config(state=state)
-        self.spin_conf.config(state=state) # 禁用微调框
+        self.spin_conf.config(state=state)
         self.chk_draw.config(state=state)
         self.btn_start_ai.config(state=state)
-        # 筛选区
         self.btn_reselect.config(state=state)
         self.entry_thresh.config(state=state)
         self.btn_del_files.config(state=state)
@@ -512,7 +544,7 @@ class UnifiedApp:
             return
 
         thresh = self.threshold_var.get()
-        ai_conf = self.conf_var.get() # [修改] 从 DoubleVar 获取高精度值
+        ai_conf = self.conf_var.get()
         
         for i, iid in enumerate(items):
             if self.stop_flag:
@@ -659,27 +691,21 @@ class UnifiedApp:
     def _preview_thread(self, path):
         try:
             cnt = int(self.preview_count_var.get())
-            ai_conf = self.conf_var.get() # [修改]
+            ai_conf = self.conf_var.get()
             draw = self.draw_skeleton_var.get()
+            # 400 是占位宽，这里不重要，因为我们现在用动态缩放
             data, ratio = self.video_processor.extract_preview_data(path, cnt, 400, ai_conf, draw)
-            self.root.after(0, lambda: self._render_preview(data, ratio))
+            
+            self.cached_preview_data = data
+            self.cached_ratio = ratio
+            
+            # 回到主线程渲染
+            self.root.after(0, lambda: self._render_preview_init())
         except: pass
 
-    def _render_preview(self, data, ratio):
-        for w in self.preview_content.winfo_children(): w.destroy()
-        tk.Label(self.preview_content, text=f"出现率: {ratio:.1f}%", font=("bold",12)).pack()
-        f_container = tk.Frame(self.preview_content)
-        f_container.pack()
-        cols = 3
-        if len(data) > 9: cols = 4
-        if len(data) > 16: cols = 5
-        
-        for i, d in enumerate(data):
-            f = tk.Frame(f_container, bd=1, relief="solid", padx=2, pady=2)
-            f.grid(row=i//cols, column=i%cols, padx=2, pady=2)
-            tk.Label(f, image=d['img_tk']).pack()
-            tk.Label(f, text=d['time']).pack()
-            f.image = d['img_tk']
+    def _render_preview_init(self):
+        """预览数据的初始化渲染，并触发一次排版"""
+        self._reflow_grid(self.preview_frame.winfo_width())
 
 if __name__ == "__main__":
     try:
