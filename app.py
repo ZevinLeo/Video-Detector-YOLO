@@ -26,6 +26,7 @@ class YoloDetector:
         self._check_environment_immediate()
 
     def _check_environment_immediate(self):
+        """启动即运行的快速环境检测"""
         try:
             if torch.cuda.is_available():
                 torch.backends.cudnn.benchmark = True
@@ -39,15 +40,12 @@ class YoloDetector:
             self.gpu_info = f"⚠️ 环境异常: {str(e)}"
 
     def get_model_classes(self, model_name):
-        """[新增] 专门用于仅读取模型类别，不永久加载"""
         path = os.path.join(self.model_dir, model_name)
         if not os.path.exists(path): path = model_name
         
-        # 如果模型已经加载在显存里，直接读
         if model_name in self.models:
             return self.models[model_name].names
         
-        # 如果没加载，临时加载一下读取元数据 (这是为了配置界面能显示类别)
         try:
             from ultralytics import YOLO
             temp_model = YOLO(path)
@@ -61,19 +59,15 @@ class YoloDetector:
             current_keys = set(self.models.keys())
             target_keys = set(target_model_names)
             
-            # 卸载
             for name in (current_keys - target_keys):
                 del self.models[name]
-                print(f"已卸载: {name}")
                 
-            # 加载
             for name in (target_keys - current_keys):
                 path = os.path.join(self.model_dir, name)
                 if not os.path.exists(path): path = name
                 if os.path.exists(path):
                     model = YOLO(path)
                     self.models[name] = model
-                    print(f"已加载: {name}")
                 else:
                     print(f"❌ 找不到: {name}")
 
@@ -92,17 +86,12 @@ class YoloDetector:
         annotated_frame = frame.copy()
 
         for name, model in self.models.items():
-            # 获取该模型的过滤配置
             target_classes = None
             if class_filters and name in class_filters:
                 selected_ids = class_filters[name]
-                # 如果列表存在但为空(用户全取消了)，那应该什么都不测，还是测所有？
-                # 逻辑定义：如果配置了且为空 -> 不检测任何东西
-                # 如果没配置(None) -> 检测所有
                 if selected_ids is not None:
                     target_classes = selected_ids
             
-            # 原生过滤
             results = model(frame, device=self.device, verbose=False, conf=conf_threshold, classes=target_classes)
             
             if results:
@@ -208,13 +197,13 @@ class VideoProcessor:
         return frames_data, ratio
 
 # =========================================================================
-# 模块 3: 全功能 UI (升级: 统一管理窗口)
+# 模块 3: 全功能 UI
 # =========================================================================
 
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("YOLO 智能视频筛选器 v2.9 - 统一管理版")
+        self.root.title("YOLO 智能视频筛选器 v3.1 - 增量筛选版")
         self.root.geometry("1400x950")
         
         self.current_filepath = None
@@ -222,10 +211,7 @@ class UnifiedApp:
         self.cached_preview_data = [] 
         self.cached_ratio = 0.0
         
-        # --- 核心配置状态 ---
-        # 1. 哪些模型要加载？ set('a.pt', 'b.pt')
         self.selected_models = set()
-        # 2. 每个模型要过滤哪些类？ {'a.pt': [0, 1], 'b.pt': None(全选)}
         self.active_class_filters = {}
         
         self.pause_event = threading.Event()
@@ -240,18 +226,16 @@ class UnifiedApp:
         self._init_ui()
         self._configure_styles()
         
-        # 启动检测：先扫描一遍文件，不自动加载，等待用户配置
         self._initial_scan()
         self.preview_canvas.bind("<Configure>", self._on_window_resize)
 
     def _initial_scan(self):
         if not os.path.exists("models"): os.makedirs("models")
-        # 默认选中第一个存在的模型（如果有）
         files = [f for f in os.listdir("models") if f.endswith(".pt")]
         if files:
             self.selected_models.add(files[0])
             self.status_var.set(f"默认选中: {files[0]} (点击管理按钮加载)")
-            self.detector.load_models(list(self.selected_models)) # 预加载第一个
+            self.detector.load_models(list(self.selected_models))
             self._update_model_status_label()
 
     def _configure_styles(self):
@@ -275,31 +259,23 @@ class UnifiedApp:
         self.btn_scan = tk.Button(path_group, text="🔍 扫描", command=self.search_files, bg="#4CAF50", fg="white", font=("Arial", 9, "bold"))
         self.btn_scan.pack(side=tk.LEFT, padx=5)
 
-        # 2. AI (界面大幅简化，核心功能进弹窗)
+        # 2. AI
         ai_group = tk.LabelFrame(top_frame, text="2-4. AI 智能参数", padx=10, pady=5)
         ai_group.pack(side=tk.LEFT, padx=10, fill=tk.Y)
         
-        # 行1
         f_row1 = tk.Frame(ai_group)
         f_row1.pack(side=tk.TOP, fill=tk.X, pady=2)
-        
-        # [核心修改] 统一管理按钮
         self.btn_manage_models = tk.Button(f_row1, text="⚙️ 模型与类别管理", command=self.open_model_manager, bg="#E3F2FD", font=("Arial", 9, "bold"))
         self.btn_manage_models.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # 显示当前选了几个模型
         self.lbl_model_status = tk.Label(f_row1, text="已选: 0", fg="gray")
         self.lbl_model_status.pack(side=tk.LEFT)
 
-        # 行2
         f_row2 = tk.Frame(ai_group)
         f_row2.pack(side=tk.TOP, fill=tk.X, pady=5)
-        
         tk.Label(f_row2, text="帧数:").pack(side=tk.LEFT)
         self.preview_count_var = tk.StringVar(value="3")
         self.combo_frames = ttk.Combobox(f_row2, textvariable=self.preview_count_var, values=[str(i) for i in range(1, 31)], width=3)
         self.combo_frames.pack(side=tk.LEFT, padx=(0,10))
-
         tk.Label(f_row2, text="灵敏度:").pack(side=tk.LEFT)
         self.conf_var = tk.DoubleVar(value=0.15)
         self.conf_scale = tk.Scale(f_row2, variable=self.conf_var, from_=0.01, to=0.95, resolution=0.01, orient=tk.HORIZONTAL, length=100, width=15, showvalue=0)
@@ -307,7 +283,6 @@ class UnifiedApp:
         self.spin_conf = tk.Spinbox(f_row2, textvariable=self.conf_var, from_=0.01, to=0.95, increment=0.01, width=4, format="%.2f")
         self.spin_conf.pack(side=tk.LEFT)
 
-        # 行3
         f_row3 = tk.Frame(ai_group)
         f_row3.pack(side=tk.TOP, fill=tk.X, pady=5)
         self.draw_labels_var = tk.BooleanVar(value=True)
@@ -324,6 +299,7 @@ class UnifiedApp:
         # 3. 筛选
         del_group = tk.LabelFrame(top_frame, text="5. 结果处理", padx=10, pady=5, fg="red")
         del_group.pack(side=tk.LEFT, padx=10, fill=tk.Y)
+        
         f_del1 = tk.Frame(del_group)
         f_del1.pack(side=tk.TOP, pady=5)
         tk.Label(f_del1, text="出现率 <").pack(side=tk.LEFT)
@@ -331,8 +307,15 @@ class UnifiedApp:
         self.entry_thresh = tk.Entry(f_del1, textvariable=self.threshold_var, width=4)
         self.entry_thresh.pack(side=tk.LEFT, padx=2)
         tk.Label(f_del1, text="%").pack(side=tk.LEFT)
-        self.btn_reselect = tk.Button(f_del1, text="⚡一键勾选", command=self.apply_threshold_selection, bg="#FF9800", fg="white")
+        
+        # [修改] 增量勾选按钮
+        self.btn_reselect = tk.Button(f_del1, text="⚡增量筛选", command=self.apply_threshold_selection, bg="#FF9800", fg="white")
         self.btn_reselect.pack(side=tk.LEFT, padx=5)
+        
+        # [新增] 清空按钮
+        self.btn_clear_sel = tk.Button(f_del1, text="❌ 清空", command=self.clear_all_selection, width=6)
+        self.btn_clear_sel.pack(side=tk.LEFT, padx=2)
+
         f_del2 = tk.Frame(del_group)
         f_del2.pack(side=tk.TOP, pady=5)
         self.btn_del_files = tk.Button(f_del2, text="🗑 删文件", command=self.delete_selected_files, bg="#f44336", fg="white")
@@ -382,98 +365,60 @@ class UnifiedApp:
         self.progress = ttk.Progressbar(bottom_bar, mode='determinate')
         self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20)
 
-    # ----------------- [核心] 统一管理窗口逻辑 -----------------
+    # ----------------- 弹窗管理逻辑 -----------------
 
     def open_model_manager(self):
-        """双栏布局：左侧选模型，右侧配类别"""
         top = tk.Toplevel(self.root)
         top.title("模型加载与类别配置中心")
         top.geometry("900x600")
         
-        # 布局：左(模型列表) - 右(类别列表)
         paned = tk.PanedWindow(top, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # --- 左侧：模型库 ---
-        frame_left = tk.LabelFrame(paned, text="1. 模型库 (勾选以加载)", padx=5, pady=5)
+        # 左侧
+        frame_left = tk.LabelFrame(paned, text="1. 模型库 (勾选加载)", padx=5, pady=5)
         paned.add(frame_left, width=300)
-        
         canvas_l = tk.Canvas(frame_left)
         scroll_l = ttk.Scrollbar(frame_left, command=canvas_l.yview)
         content_l = tk.Frame(canvas_l)
-        
         content_l.bind("<Configure>", lambda e: canvas_l.configure(scrollregion=canvas_l.bbox("all")))
         canvas_l.create_window((0,0), window=content_l, anchor="nw")
         canvas_l.configure(yscrollcommand=scroll_l.set)
-        
         canvas_l.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll_l.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # --- 右侧：类别配置 ---
-        frame_right = tk.LabelFrame(paned, text="2. 类别筛选 (配置选中模型的检测目标)", padx=5, pady=5)
+        # 右侧
+        frame_right = tk.LabelFrame(paned, text="2. 类别筛选 (配置选中模型的类别)", padx=5, pady=5)
         paned.add(frame_right, width=500)
-        
         self.lbl_right_header = tk.Label(frame_right, text="请先在左侧点击模型名称...", font=("Arial", 10, "bold"), fg="gray")
         self.lbl_right_header.pack(fill=tk.X, pady=5)
-        
-        # 类别列表区域 (动态刷新)
         self.frame_classes_container = tk.Frame(frame_right)
         self.frame_classes_container.pack(fill=tk.BOTH, expand=True)
         
-        # 底部按钮
-        btn_frame = tk.Frame(top, pady=10)
-        btn_frame.pack(fill=tk.X)
-        tk.Button(btn_frame, text="保存并应用配置", command=lambda: self._save_manager_config(top), bg="#4CAF50", fg="white", width=20, font=("bold", 10)).pack()
+        tk.Button(top, text="保存并应用配置", command=lambda: self._save_manager_config(top), bg="#4CAF50", fg="white", width=20, font=("bold", 10)).pack(pady=10)
 
-        # --- 临时状态存储 (避免直接修改主程序状态，直到点击保存) ---
-        # 1. 模型加载状态: { 'a.pt': BooleanVar }
         self.temp_model_vars = {}
-        # 2. 类别过滤状态: { 'a.pt': { 0: BooleanVar, 1: BooleanVar } }
         self.temp_class_vars = {} 
-        # 3. 当前正在配置哪个模型 (右侧显示谁)
         self.current_editing_model = None
         
-        # --- 初始化左侧列表 ---
         files = [f for f in os.listdir("models") if f.endswith(".pt")]
-        if not files:
-            tk.Label(content_l, text="未找到 .pt 文件\n请放入 models 文件夹").pack(pady=20)
+        if not files: tk.Label(content_l, text="未找到 .pt 文件").pack(pady=20)
         
         for f in files:
-            # 初始化勾选状态 (继承自 current selected_models)
             is_checked = f in self.selected_models
             var = tk.BooleanVar(value=is_checked)
             self.temp_model_vars[f] = var
-            
             row = tk.Frame(content_l, bd=1, relief=tk.RIDGE)
             row.pack(fill=tk.X, pady=2)
-            
-            # 勾选框
-            chk = tk.Checkbutton(row, variable=var)
-            chk.pack(side=tk.LEFT)
-            
-            # 按钮 (点击进入右侧编辑)
-            # 使用闭包绑定 f
-            btn = tk.Button(row, text=f, anchor="w", relief=tk.FLAT, 
-                            command=lambda m=f: self._load_classes_to_right_panel(m))
-            btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            
-            # 初始化类别变量缓存 (继承自 active_class_filters)
-            # 如果 active_class_filters 里没有 key，说明是全选。
-            # 这里我们不预先生成所有 class var，因为要读取模型才知道有多少类。
-            # 我们等到 _load_classes_to_right_panel 时再生成。
+            tk.Checkbutton(row, variable=var).pack(side=tk.LEFT)
+            tk.Button(row, text=f, anchor="w", relief=tk.FLAT, command=lambda m=f: self._load_classes_to_right_panel(m)).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     def _load_classes_to_right_panel(self, model_name):
-        """点击左侧模型名，右侧显示其类别"""
         self.current_editing_model = model_name
         self.lbl_right_header.config(text=f"正在配置: [{model_name}] 的检测类别", fg="blue")
+        for w in self.frame_classes_container.winfo_children(): w.destroy()
         
-        # 清空右侧容器
-        for widget in self.frame_classes_container.winfo_children():
-            widget.destroy()
-            
-        # 获取类别 (可能需要临时加载)
-        # 提示用户
-        loading_lbl = tk.Label(self.frame_classes_container, text="正在读取模型元数据...")
+        loading_lbl = tk.Label(self.frame_classes_container, text="读取元数据...")
         loading_lbl.pack(pady=20)
         self.root.update()
         
@@ -481,49 +426,34 @@ class UnifiedApp:
         loading_lbl.destroy()
         
         if not classes:
-            tk.Label(self.frame_classes_container, text="无法读取类别 (模型可能损坏)").pack()
+            tk.Label(self.frame_classes_container, text="无法读取类别").pack()
             return
 
-        # 创建滚动区
         canvas = tk.Canvas(self.frame_classes_container)
         scrollbar = ttk.Scrollbar(self.frame_classes_container, command=canvas.yview)
         content = tk.Frame(canvas)
-        
         content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0,0), window=content, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
-        
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # 全选/全不选 按钮区
         tool_frame = tk.Frame(content)
         tool_frame.pack(fill=tk.X, pady=5)
         
-        # 确保 temp_class_vars 有该模型的条目
         if model_name not in self.temp_class_vars:
             self.temp_class_vars[model_name] = {}
-            # 从 self.active_class_filters 恢复状态
-            # 如果 self.active_class_filters[model_name] 是列表，说明只选了这些。
-            # 如果是 None 或 不存在，说明全选。
             saved_ids = self.active_class_filters.get(model_name, None)
-            
             for cid in classes.keys():
-                if saved_ids is None: # 默认全选
-                    is_on = True
-                else:
-                    is_on = (cid in saved_ids)
+                is_on = (saved_ids is None) or (cid in saved_ids)
                 self.temp_class_vars[model_name][cid] = tk.BooleanVar(value=is_on)
 
-        # 辅助函数：批量操作
         def toggle_all(state):
             for v in self.temp_class_vars[model_name].values(): v.set(state)
 
         tk.Button(tool_frame, text="全选", command=lambda: toggle_all(True), width=8).pack(side=tk.LEFT, padx=2)
         tk.Button(tool_frame, text="全不选", command=lambda: toggle_all(False), width=8).pack(side=tk.LEFT, padx=2)
 
-        # 生成类别勾选列表
-        # 使用 Grid 布局，每行3列
         grid_frame = tk.Frame(content)
         grid_frame.pack(fill=tk.BOTH, expand=True)
         
@@ -532,48 +462,35 @@ class UnifiedApp:
             var = self.temp_class_vars[model_name][cid]
             chk = tk.Checkbutton(grid_frame, text=f"{cid}: {cname}", variable=var, anchor="w")
             chk.grid(row=row, column=col, sticky="w", padx=10, pady=2)
-            
             col += 1
-            if col > 2: # 3列换行
+            if col > 2: 
                 col = 0
                 row += 1
 
     def _save_manager_config(self, window):
-        """保存配置到主程序"""
-        # 1. 更新选中的模型列表
         new_selected = set()
         for name, var in self.temp_model_vars.items():
-            if var.get():
-                new_selected.add(name)
+            if var.get(): new_selected.add(name)
         
         if len(new_selected) > 3:
-            messagebox.showwarning("警告", "为了性能，建议最多勾选 3 个模型！\n(已保存，但运行可能变慢)")
+            messagebox.showwarning("警告", "建议最多勾选 3 个模型！")
         
         self.selected_models = new_selected
         self._update_model_status_label()
         
-        # 2. 更新类别过滤配置
-        # 逻辑：如果某模型没被配置过(temp里没有)，或者全选了，就设为 None (代表不原生过滤，或全检测)
-        # 如果部分选了，就存 list
         for m_name, id_map in self.temp_class_vars.items():
-            selected_ids = []
+            selected_ids = [cid for cid, v in id_map.items() if v.get()]
             all_ids = list(id_map.keys())
-            for cid, var in id_map.items():
-                if var.get():
-                    selected_ids.append(cid)
             
             if len(selected_ids) == len(all_ids):
-                # 全选了，存 None 节省计算
                 self.active_class_filters[m_name] = None
             elif len(selected_ids) == 0:
-                # 一个没选，存空列表 (YOLO会什么都不检测)
                 self.active_class_filters[m_name] = []
             else:
                 self.active_class_filters[m_name] = selected_ids
                 
-        # 3. 立即加载模型 (后台线程)
         if self.selected_models:
-            self.status_var.set("正在应用模型配置...")
+            self.status_var.set("正在应用配置...")
             threading.Thread(target=self._reload_models_async, daemon=True).start()
         
         window.destroy()
@@ -581,11 +498,10 @@ class UnifiedApp:
     def _reload_models_async(self):
         success, msg = self.detector.load_models(list(self.selected_models))
         self.root.after(0, lambda: self.gpu_status_var.set(msg))
-        self.root.after(0, lambda: self.status_var.set("模型配置已更新"))
+        self.root.after(0, lambda: self.status_var.set("配置已更新"))
 
     def _update_model_status_label(self):
-        count = len(self.selected_models)
-        self.lbl_model_status.config(text=f"已选: {count}")
+        self.lbl_model_status.config(text=f"已选: {len(self.selected_models)}")
 
     # ----------------- 响应式布局 -----------------
 
@@ -640,13 +556,14 @@ class UnifiedApp:
         self.btn_select.config(state=state)
         self.btn_scan.config(state=state)
         self.entry_path.config(state=state)
-        self.btn_manage_models.config(state=state) # [修改]
+        self.btn_manage_models.config(state=state)
         self.combo_frames.config(state="readonly" if enable else tk.DISABLED)
         self.conf_scale.config(state=state)
         self.spin_conf.config(state=state)
         self.chk_draw.config(state=state)
         self.btn_start_ai.config(state=state)
         self.btn_reselect.config(state=state)
+        self.btn_clear_sel.config(state=state)
         self.entry_thresh.config(state=state)
         self.btn_del_files.config(state=state)
         self.btn_del_folders.config(state=state)
@@ -729,11 +646,9 @@ class UnifiedApp:
         self.progress['mode'] = 'determinate'
         self.progress['maximum'] = len(items)
         
-        # 传入 active_class_filters
         threading.Thread(target=self._ai_scan_thread, args=(items, scan_frames, draw_labels, list(self.selected_models), self.active_class_filters), daemon=True).start()
 
     def _ai_scan_thread(self, items, scan_frames, draw_labels, selected_models, class_filters):
-        # 确保模型已加载
         success, msg = self.detector.load_models(selected_models)
         self.root.after(0, lambda: self.gpu_status_var.set(msg))
         
@@ -772,18 +687,35 @@ class UnifiedApp:
         self.update_checkbox_display(iid)
 
     def apply_threshold_selection(self):
+        """[核心] 增量勾选：只增加符合条件的，不取消已选的"""
         try: thresh = self.threshold_var.get()
         except: return
-        count = 0
+        count_new = 0
+        count_total = 0
         for iid in self.tree.get_children():
             score_str = self.tree.item(iid, 'values')[2]
             if "%" in score_str:
-                score = float(score_str.replace("%", ""))
-                should = score < thresh
-                self.checkbox_vars[iid].set(should)
-                self.update_checkbox_display(iid)
-                if should: count += 1
-        self.status_var.set(f"已勾选 {count} 个出现率 < {thresh}% 的文件")
+                try:
+                    score = float(score_str.replace("%", ""))
+                    # 只有当 score < thresh 且当前没选时，才把它加上
+                    if score < thresh:
+                        if not self.checkbox_vars[iid].get():
+                            self.checkbox_vars[iid].set(True)
+                            self.update_checkbox_display(iid)
+                            count_new += 1
+                    
+                    if self.checkbox_vars[iid].get():
+                        count_total += 1
+                except: pass
+        
+        self.status_var.set(f"当前已选 {count_total} 个 (本次新增 {count_new} 个)")
+
+    def clear_all_selection(self):
+        """清空所有勾选"""
+        for iid in self.checkbox_vars:
+            self.checkbox_vars[iid].set(False)
+            self.update_checkbox_display(iid)
+        self.status_var.set("已清空所有选择")
 
     def _get_checked_items(self):
         return [(i, self.tree.item(i, 'values')[4]) for i, v in self.checkbox_vars.items() if v.get()]
