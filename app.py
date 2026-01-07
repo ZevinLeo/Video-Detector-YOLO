@@ -249,7 +249,7 @@ class VideoProcessor:
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("智能视频筛选器V2.0           作者：倪梓纹")
+        self.root.title("YOLO 智能视频筛选器 v1.1                  作者：倪梓纹")
         self.root.geometry("1400x950")
         
         self.current_filepath = None
@@ -295,7 +295,7 @@ class UnifiedApp:
         top_frame.pack(fill=tk.X)
         
         # --- 区域 1: 扫描 ---
-        path_group = tk.LabelFrame(top_frame, text="1. 扫描设置", padx=10, pady=5)
+        path_group = tk.LabelFrame(top_frame, text="扫描设置", padx=10, pady=5)
         path_group.pack(side=tk.LEFT, padx=10, fill=tk.Y)
         self.path_var = tk.StringVar()
         self.entry_path = tk.Entry(path_group, textvariable=self.path_var, width=18)
@@ -306,7 +306,7 @@ class UnifiedApp:
         self.btn_scan.pack(side=tk.LEFT, padx=5)
 
         # --- 区域 2: AI 参数 ---
-        ai_group = tk.LabelFrame(top_frame, text="2-4. AI 智能参数", padx=10, pady=5)
+        ai_group = tk.LabelFrame(top_frame, text="AI 智能参数", padx=10, pady=5)
         ai_group.pack(side=tk.LEFT, padx=10, fill=tk.Y)
         
         # 行1
@@ -346,7 +346,7 @@ class UnifiedApp:
         self.btn_stop.pack(side=tk.LEFT, padx=2)
 
         # --- 区域 3: 筛选 ---
-        del_group = tk.LabelFrame(top_frame, text="5. 结果处理", padx=10, pady=5, fg="red")
+        del_group = tk.LabelFrame(top_frame, text="结果处理", padx=10, pady=5, fg="red")
         del_group.pack(side=tk.LEFT, padx=10, fill=tk.Y)
         
         f_del1 = tk.Frame(del_group)
@@ -390,8 +390,11 @@ class UnifiedApp:
             
         scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscroll=scroll.set)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # === 关键修改：修复滚动条布局 ===
+        # 先 Pack 滚动条（让它占据右侧位置），再 Pack 列表（让它填充剩余空间）
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         # === 事件绑定 ===
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select_preview)
