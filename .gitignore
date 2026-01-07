@@ -28,4 +28,4 @@ env/
 # --- AI 模型 (可选) ---
 # yolov8n-pose.pt 只有 6MB，传上去没事。
 # 但如果你以后用了几百 MB 的大模型，就把下面这行取消注释
-# models/*.pt
+models/*.pt
