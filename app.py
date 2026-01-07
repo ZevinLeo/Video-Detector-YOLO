@@ -7,9 +7,10 @@ from PIL import Image, ImageTk
 import cv2
 import torch
 import time
+import sys
 
 # =========================================================================
-# 模块 1: AI 智能引擎 (YOLOv8 GPU)
+# 模块 1: AI 智能引擎 (含显卡环境深度检测)
 # =========================================================================
 
 class YoloDetector:
@@ -17,17 +18,42 @@ class YoloDetector:
         self.available = False
         self.model = None
         self.device = 'cpu'
+        # 默认状态文本
+        self.gpu_info = "正在检测计算设备..."
         self._try_load_model()
 
     def _try_load_model(self):
         try:
             from ultralytics import YOLO
+            
+            # --- 核心修改：环境检测与详细信息获取 ---
             if torch.cuda.is_available():
+                # [优化] 开启基准测试，让 cuDNN 在 CUDA 11.8+ 环境下自动寻找最快算法
+                torch.backends.cudnn.benchmark = True
                 self.device = 'cuda'
-            self.model = YOLO('yolov8n-pose.pt') 
+                
+                # 获取显卡详细信息
+                gpu_name = torch.cuda.get_device_name(0)
+                cuda_ver = torch.version.cuda
+                # 构造状态字符串
+                self.gpu_info = f"🚀 计算设备: {gpu_name} | CUDA: {cuda_ver} (加速中)"
+            else:
+                self.device = 'cpu'
+                self.gpu_info = "🐢 计算设备: CPU (未检测到 GPU，运行较慢)"
+
+            # 加载模型 (假设模型在当前目录或 models 目录下)
+            # 为了兼容打包，这里简单处理，你可以结合之前的 path 逻辑
+            model_name = 'yolov8n-pose.pt'
+            if os.path.exists(os.path.join("models", model_name)):
+                self.model = YOLO(os.path.join("models", model_name))
+            else:
+                self.model = YOLO(model_name) # 尝试直接加载或下载
+            
             self.available = True
+            
         except Exception as e:
             print(f"YOLO 加载失败: {e}")
+            self.gpu_info = f"⚠️ AI 引擎加载失败: {str(e)}"
             self.available = False
 
     def process_frame(self, frame, conf_threshold=0.15):
@@ -48,7 +74,6 @@ class YoloDetector:
                     kpts = keypoints_conf[i]
                     if len(kpts) < 11: continue 
 
-                    # 只要有一个点的置信度 > 传入的阈值，就算有手
                     if (kpts[9] > conf_threshold or kpts[10] > conf_threshold or 
                         kpts[7] > conf_threshold or kpts[8] > conf_threshold):
                         
@@ -69,7 +94,7 @@ class YoloDetector:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
 # =========================================================================
-# 模块 2: 核心逻辑层 (保持不变)
+# 模块 2: 核心逻辑层
 # =========================================================================
 
 class FileManager:
@@ -149,19 +174,17 @@ class VideoProcessor:
         return frames_data, ratio
 
     def _resize_for_tk(self, frame_bgr, target_width, grid_count):
-        """[升级] 适配 1-30 帧的自动缩放逻辑"""
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         height, width = frame_rgb.shape[:2]
         
         is_narrow_mode = target_width < 380 
         
-        # 动态计算最大宽度，保证30张图也能放下
         if is_narrow_mode or grid_count <= 1: max_w = int(target_width * 0.95)
-        elif grid_count <= 4:  max_w = int(target_width * 0.46) # 2列
-        elif grid_count <= 9:  max_w = int(target_width * 0.30) # 3列
-        elif grid_count <= 16: max_w = int(target_width * 0.22) # 4列
-        elif grid_count <= 25: max_w = int(target_width * 0.18) # 5列
-        else:                  max_w = int(target_width * 0.15) # 6列 (Max 30)
+        elif grid_count <= 4:  max_w = int(target_width * 0.46)
+        elif grid_count <= 9:  max_w = int(target_width * 0.30)
+        elif grid_count <= 16: max_w = int(target_width * 0.22)
+        elif grid_count <= 25: max_w = int(target_width * 0.18)
+        else:                  max_w = int(target_width * 0.15)
 
         max_w = min(max_w, 500) 
         max_h = int(max_w * 0.75)
@@ -172,13 +195,13 @@ class VideoProcessor:
         return ImageTk.PhotoImage(img.resize((new_w, new_h), Image.Resampling.LANCZOS))
 
 # =========================================================================
-# 模块 3: 全功能 UI (升级: 支持30帧选项)
+# 模块 3: 全功能 UI (升级: 底部显卡状态栏)
 # =========================================================================
 
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("全能版 MP4 AI智能筛选器    作者：倪梓纹")
+        self.root.title("全能版 MP4 AI智能筛选器     作者：倪梓纹")
         self.root.geometry("1400x900")
         
         self.current_filepath = None
@@ -224,7 +247,6 @@ class UnifiedApp:
         # 流程 2: 视图范围 (1-30帧)
         tk.Label(ai_group, text="帧数:").pack(side=tk.LEFT)
         self.preview_count_var = tk.StringVar(value="3")
-        # [升级] 范围扩大到 1-30
         ttk.Combobox(ai_group, textvariable=self.preview_count_var, values=[str(i) for i in range(1, 31)], width=3).pack(side=tk.LEFT, padx=(0,10))
 
         # 流程 3: AI灵敏度
@@ -266,7 +288,6 @@ class UnifiedApp:
 
         list_frame = tk.Frame(paned)
         paned.add(list_frame, width=600)
-        # 修改列名显示
         cols = ("checkbox", "filename", "ai_score", "folder", "full_path")
         self.tree = ttk.Treeview(list_frame, columns=cols, show='headings')
         headers = [("✓", 40), ("文件名", 200), ("含手率", 80), ("父文件夹", 120), ("完整路径", 150)]
@@ -295,10 +316,24 @@ class UnifiedApp:
         self.preview_scroll.pack(side="right", fill="y")
         self.preview_canvas.configure(yscrollcommand=self.preview_scroll.set)
 
-        self.progress = ttk.Progressbar(self.root, mode='determinate')
-        self.progress.pack(fill=tk.X, side=tk.BOTTOM)
+        # --- 底部状态栏 (核心修改区) ---
+        # 使用一个 Frame 容器来管理底部所有元素，实现三段式布局
+        bottom_bar = tk.Frame(self.root, bd=1, relief=tk.SUNKEN)
+        bottom_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # 1. 左侧：显卡状态 (显示 GPU 型号和 CUDA 版本)
+        # 如果是 CPU 模式，字体是黑色；如果是 GPU 模式，字体是绿色
+        status_color = "#2E7D32" if "加速中" in self.detector.gpu_info else "black"
+        self.gpu_status_var = tk.StringVar(value=self.detector.gpu_info)
+        tk.Label(bottom_bar, textvariable=self.gpu_status_var, fg=status_color, font=("Segoe UI", 9, "bold"), padx=10).pack(side=tk.LEFT)
+
+        # 3. 右侧：通用状态提示 (如 "准备就绪")
         self.status_var = tk.StringVar(value="准备就绪")
-        tk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W).pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Label(bottom_bar, textvariable=self.status_var, padx=10).pack(side=tk.RIGHT)
+
+        # 2. 中间：进度条 (自适应填充剩余空间)
+        self.progress = ttk.Progressbar(bottom_bar, mode='determinate')
+        self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20)
 
     # ----------------- 逻辑部分 -----------------
 
@@ -345,8 +380,6 @@ class UnifiedApp:
             self.btn_start_ai.config(state=tk.DISABLED)
             self.btn_pause.config(state=tk.NORMAL, text="⏸", bg="SystemButtonFace")
             self.btn_stop.config(state=tk.NORMAL)
-            # 锁定帧数选择
-            # self.path_var.set(self.path_var.get())
         else:
             self.btn_start_ai.config(state=tk.NORMAL)
             self.btn_pause.config(state=tk.DISABLED, text="⏸", bg="SystemButtonFace")
@@ -384,7 +417,6 @@ class UnifiedApp:
         items = self.tree.get_children()
         if not items: return
         
-        # [逻辑] 获取当前用户设置的帧数，批量扫描也用这个帧数！
         try:
             scan_frames = int(self.preview_count_var.get())
         except:
@@ -399,7 +431,6 @@ class UnifiedApp:
         self._set_ui_state_running(True)
         self.progress['mode'] = 'determinate'
         self.progress['maximum'] = len(items)
-        # 将 scan_frames 传入线程
         threading.Thread(target=self._ai_scan_thread, args=(items, scan_frames), daemon=True).start()
 
     def _ai_scan_thread(self, items, scan_frames):
@@ -416,7 +447,6 @@ class UnifiedApp:
 
             path = self.tree.item(iid, 'values')[4]
             try:
-                # 使用界面上选择的 scan_frames (1-30)
                 _, ratio = self.video_processor.extract_preview_data(path, scan_frames, 100, ai_conf)
                 
                 is_waste = ratio < thresh
@@ -481,7 +511,6 @@ class UnifiedApp:
         num_frames = len(data)
         if num_frames == 0: return
         
-        # [升级] 适配 30 帧的列数逻辑
         if current_width < 380: cols = 1
         elif num_frames <= 1: cols = 1
         elif num_frames <= 4: cols = 2
