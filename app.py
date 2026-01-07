@@ -10,7 +10,7 @@ import time
 import sys
 
 # =========================================================================
-# 模块 1: AI 智能引擎 (含显卡环境深度检测)
+# 模块 1: AI 智能引擎 (保持 GPU 检测功能)
 # =========================================================================
 
 class YoloDetector:
@@ -18,39 +18,30 @@ class YoloDetector:
         self.available = False
         self.model = None
         self.device = 'cpu'
-        # 默认状态文本
         self.gpu_info = "正在检测计算设备..."
         self._try_load_model()
 
     def _try_load_model(self):
         try:
             from ultralytics import YOLO
-            
-            # --- 核心修改：环境检测与详细信息获取 ---
             if torch.cuda.is_available():
-                # [优化] 开启基准测试，让 cuDNN 在 CUDA 11.8+ 环境下自动寻找最快算法
                 torch.backends.cudnn.benchmark = True
                 self.device = 'cuda'
-                
-                # 获取显卡详细信息
                 gpu_name = torch.cuda.get_device_name(0)
                 cuda_ver = torch.version.cuda
-                # 构造状态字符串
                 self.gpu_info = f"🚀 计算设备: {gpu_name} | CUDA: {cuda_ver} (加速中)"
             else:
                 self.device = 'cpu'
                 self.gpu_info = "🐢 计算设备: CPU (未检测到 GPU，运行较慢)"
 
-            # 加载模型 (假设模型在当前目录或 models 目录下)
-            # 为了兼容打包，这里简单处理，你可以结合之前的 path 逻辑
             model_name = 'yolov8n-pose.pt'
+            # 尝试加载模型
             if os.path.exists(os.path.join("models", model_name)):
                 self.model = YOLO(os.path.join("models", model_name))
             else:
-                self.model = YOLO(model_name) # 尝试直接加载或下载
+                self.model = YOLO(model_name)
             
             self.available = True
-            
         except Exception as e:
             print(f"YOLO 加载失败: {e}")
             self.gpu_info = f"⚠️ AI 引擎加载失败: {str(e)}"
@@ -76,12 +67,9 @@ class YoloDetector:
 
                     if (kpts[9] > conf_threshold or kpts[10] > conf_threshold or 
                         kpts[7] > conf_threshold or kpts[8] > conf_threshold):
-                        
                         has_hand = True
-                        
                         if kpts[9] > conf_threshold: self._draw_marker(annotated_frame, *keypoints_xy[i][9], "L-Wrist")
                         elif kpts[7] > conf_threshold: self._draw_marker(annotated_frame, *keypoints_xy[i][7], "L-Arm")
-                        
                         if kpts[10] > conf_threshold: self._draw_marker(annotated_frame, *keypoints_xy[i][10], "R-Wrist")
                         elif kpts[8] > conf_threshold: self._draw_marker(annotated_frame, *keypoints_xy[i][8], "R-Arm")
 
@@ -176,7 +164,6 @@ class VideoProcessor:
     def _resize_for_tk(self, frame_bgr, target_width, grid_count):
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         height, width = frame_rgb.shape[:2]
-        
         is_narrow_mode = target_width < 380 
         
         if is_narrow_mode or grid_count <= 1: max_w = int(target_width * 0.95)
@@ -188,20 +175,19 @@ class VideoProcessor:
 
         max_w = min(max_w, 500) 
         max_h = int(max_w * 0.75)
-        
         scale = min(max_w/width, max_h/height)
         new_w, new_h = int(width * scale), int(height * scale)
         img = Image.fromarray(frame_rgb)
         return ImageTk.PhotoImage(img.resize((new_w, new_h), Image.Resampling.LANCZOS))
 
 # =========================================================================
-# 模块 3: 全功能 UI (升级: 底部显卡状态栏)
+# 模块 3: 全功能 UI (升级: 稳定性控制 + 删除不刷新)
 # =========================================================================
 
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("全能版 MP4 AI智能筛选器     作者：倪梓纹")
+        self.root.title("全能版 MP4 AI智能筛选器 (Stable) - 作者: 倪梓纹")
         self.root.geometry("1400x900")
         
         self.current_filepath = None
@@ -232,30 +218,32 @@ class UnifiedApp:
         top_frame = tk.Frame(self.root, pady=10)
         top_frame.pack(fill=tk.X)
         
-        # 流程 1: 获取文件列表
-        path_group = tk.LabelFrame(top_frame, text="1. 获取文件列表", padx=5, pady=5)
+        # 1. 扫描区
+        path_group = tk.LabelFrame(top_frame, text="获取文件列表", padx=5, pady=5)
         path_group.pack(side=tk.LEFT, padx=5, fill=tk.Y)
         self.path_var = tk.StringVar()
-        tk.Entry(path_group, textvariable=self.path_var, width=20).pack(side=tk.LEFT)
-        tk.Button(path_group, text="📂", command=self.select_folder).pack(side=tk.LEFT)
-        tk.Button(path_group, text="扫描", command=self.search_files, bg="#4CAF50", fg="white").pack(side=tk.LEFT, padx=5)
+        # 保存控件引用以便禁用
+        self.entry_path = tk.Entry(path_group, textvariable=self.path_var, width=20)
+        self.entry_path.pack(side=tk.LEFT)
+        self.btn_select = tk.Button(path_group, text="📂", command=self.select_folder)
+        self.btn_select.pack(side=tk.LEFT)
+        self.btn_scan = tk.Button(path_group, text="扫描", command=self.search_files, bg="#4CAF50", fg="white")
+        self.btn_scan.pack(side=tk.LEFT, padx=5)
 
-        # 流程 2 & 3 & 4: 视图 + AI 设置 + 运行
-        ai_group = tk.LabelFrame(top_frame, text="2-4. 视图/灵敏度/AI初筛", padx=5, pady=5)
+        # 2. AI 设置区
+        ai_group = tk.LabelFrame(top_frame, text="AI 设置与扫描", padx=5, pady=5)
         ai_group.pack(side=tk.LEFT, padx=5, fill=tk.Y)
         
-        # 流程 2: 视图范围 (1-30帧)
         tk.Label(ai_group, text="帧数:").pack(side=tk.LEFT)
         self.preview_count_var = tk.StringVar(value="3")
-        ttk.Combobox(ai_group, textvariable=self.preview_count_var, values=[str(i) for i in range(1, 31)], width=3).pack(side=tk.LEFT, padx=(0,10))
+        self.combo_frames = ttk.Combobox(ai_group, textvariable=self.preview_count_var, values=[str(i) for i in range(1, 31)], width=3)
+        self.combo_frames.pack(side=tk.LEFT, padx=(0,10))
 
-        # 流程 3: AI灵敏度
         tk.Label(ai_group, text="AI灵敏度:").pack(side=tk.LEFT)
         self.conf_scale = tk.Scale(ai_group, from_=0.01, to=0.9, resolution=0.01, orient=tk.HORIZONTAL, length=80)
         self.conf_scale.set(0.15) 
         self.conf_scale.pack(side=tk.LEFT, padx=(0,10))
 
-        # 流程 4: AI初筛 (含暂停/终止)
         self.btn_start_ai = tk.Button(ai_group, text="▶ 运行AI初筛", command=self.start_batch_ai_scan, bg="#2196F3", fg="white")
         self.btn_start_ai.pack(side=tk.LEFT, padx=2)
         self.btn_pause = tk.Button(ai_group, text="⏸", command=self.toggle_pause, state=tk.DISABLED, width=3)
@@ -263,26 +251,28 @@ class UnifiedApp:
         self.btn_stop = tk.Button(ai_group, text="⏹", command=self.stop_task, state=tk.DISABLED, bg="#ffcccb", width=3)
         self.btn_stop.pack(side=tk.LEFT, padx=1)
 
-        # 流程 5 & 6: 阈值筛选 + 删除
-        del_group = tk.LabelFrame(top_frame, text="5-6. 筛选阈值/删除", padx=5, pady=5, fg="red")
+        # 3. 筛选删除区
+        del_group = tk.LabelFrame(top_frame, text="筛选阈值/删除", padx=5, pady=5, fg="red")
         del_group.pack(side=tk.LEFT, padx=5, fill=tk.Y)
 
-        # 流程 5: 选择含手率阈值
         filter_frame = tk.Frame(del_group)
         filter_frame.pack(side=tk.TOP, fill=tk.X, pady=2)
         tk.Label(filter_frame, text="含手率 <").pack(side=tk.LEFT)
         self.threshold_var = tk.IntVar(value=20)
-        tk.Entry(filter_frame, textvariable=self.threshold_var, width=3).pack(side=tk.LEFT)
+        self.entry_thresh = tk.Entry(filter_frame, textvariable=self.threshold_var, width=3)
+        self.entry_thresh.pack(side=tk.LEFT)
         tk.Label(filter_frame, text="%").pack(side=tk.LEFT)
-        tk.Button(filter_frame, text="⚡重选", command=self.apply_threshold_selection, bg="#FF9800", fg="white", font=("Arial", 8)).pack(side=tk.LEFT, padx=5)
+        self.btn_reselect = tk.Button(filter_frame, text="⚡重选", command=self.apply_threshold_selection, bg="#FF9800", fg="white", font=("Arial", 8))
+        self.btn_reselect.pack(side=tk.LEFT, padx=5)
 
-        # 流程 6: 删除
         action_frame = tk.Frame(del_group)
         action_frame.pack(side=tk.TOP, fill=tk.X, pady=2)
-        tk.Button(action_frame, text="🗑 删文件", command=self.delete_selected_files, bg="#f44336", fg="white").pack(side=tk.LEFT, padx=2)
-        tk.Button(action_frame, text="📂 删文件夹", command=self.delete_selected_folders, bg="#D32F2F", fg="white").pack(side=tk.LEFT, padx=2)
+        self.btn_del_files = tk.Button(action_frame, text="🗑 删文件", command=self.delete_selected_files, bg="#f44336", fg="white")
+        self.btn_del_files.pack(side=tk.LEFT, padx=2)
+        self.btn_del_folders = tk.Button(action_frame, text="📂 删文件夹", command=self.delete_selected_folders, bg="#D32F2F", fg="white")
+        self.btn_del_folders.pack(side=tk.LEFT, padx=2)
 
-        # 主区域
+        # 主列表和预览区
         paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -308,103 +298,100 @@ class UnifiedApp:
         self.preview_canvas = tk.Canvas(self.preview_frame, bg="#eeeeee")
         self.preview_scroll = tk.Scrollbar(self.preview_frame, orient="vertical", command=self.preview_canvas.yview)
         self.preview_content = tk.Frame(self.preview_canvas, bg="#eeeeee")
-        self.preview_win = self.preview_canvas.create_window((0,0), anchor="nw", window=self.preview_content)
+        self.preview_canvas.create_window((0,0), anchor="nw", window=self.preview_content)
         self.preview_content.bind("<Configure>", lambda e: self.preview_canvas.configure(scrollregion=self.preview_canvas.bbox("all")))
-        self.preview_canvas.bind("<Configure>", lambda e: self.preview_canvas.itemconfig(self.preview_win, width=self.preview_canvas.winfo_width()))
-        self.preview_content.bind("<MouseWheel>", lambda e: self.preview_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        self.preview_canvas.bind("<Configure>", lambda e: self.preview_canvas.itemconfig(self.preview_canvas.find_all()[0], width=self.preview_canvas.winfo_width()))
         self.preview_canvas.pack(side="left", fill="both", expand=True)
         self.preview_scroll.pack(side="right", fill="y")
         self.preview_canvas.configure(yscrollcommand=self.preview_scroll.set)
 
-        # --- 底部状态栏 (核心修改区) ---
-        # 使用一个 Frame 容器来管理底部所有元素，实现三段式布局
+        # 底部状态栏
         bottom_bar = tk.Frame(self.root, bd=1, relief=tk.SUNKEN)
         bottom_bar.pack(side=tk.BOTTOM, fill=tk.X)
-
-        # 1. 左侧：显卡状态 (显示 GPU 型号和 CUDA 版本)
-        # 如果是 CPU 模式，字体是黑色；如果是 GPU 模式，字体是绿色
         status_color = "#2E7D32" if "加速中" in self.detector.gpu_info else "black"
         self.gpu_status_var = tk.StringVar(value=self.detector.gpu_info)
         tk.Label(bottom_bar, textvariable=self.gpu_status_var, fg=status_color, font=("Segoe UI", 9, "bold"), padx=10).pack(side=tk.LEFT)
-
-        # 3. 右侧：通用状态提示 (如 "准备就绪")
         self.status_var = tk.StringVar(value="准备就绪")
         tk.Label(bottom_bar, textvariable=self.status_var, padx=10).pack(side=tk.RIGHT)
-
-        # 2. 中间：进度条 (自适应填充剩余空间)
         self.progress = ttk.Progressbar(bottom_bar, mode='determinate')
         self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20)
 
-    # ----------------- 逻辑部分 -----------------
+    # ----------------- 核心控制逻辑 (修改重点) -----------------
 
-    def apply_threshold_selection(self):
-        try:
-            thresh = self.threshold_var.get()
-        except:
-            return
-        count_checked = 0
-        for iid in self.tree.get_children():
-            score_str = self.tree.item(iid, 'values')[2]
-            if "%" in score_str:
-                try:
-                    score = float(score_str.replace("%", ""))
-                    should_check = score < thresh
-                    self.checkbox_vars[iid].set(should_check)
-                    self.update_checkbox_display(iid)
-                    if should_check: count_checked += 1
-                except:
-                    pass
-        self.status_var.set(f"筛选更新：已勾选 {count_checked} 个含手率低于 {thresh}% 的视频")
+    def _toggle_inputs(self, enable):
+        """[新增] 统一开启或禁用所有交互控件"""
+        state = tk.NORMAL if enable else tk.DISABLED
+        
+        # 禁用/开启 扫描相关
+        self.btn_select.config(state=state)
+        self.btn_scan.config(state=state)
+        self.entry_path.config(state=state)
+        
+        # 禁用/开启 AI 设置
+        self.combo_frames.config(state="readonly" if enable else tk.DISABLED)
+        self.conf_scale.config(state=state)
+        self.btn_start_ai.config(state=state)
+        
+        # 禁用/开启 筛选删除 (注意：删除时这些也要禁掉)
+        self.btn_reselect.config(state=state)
+        self.entry_thresh.config(state=state)
+        self.btn_del_files.config(state=state)
+        self.btn_del_folders.config(state=state)
 
-    def toggle_pause(self):
-        if not self.is_running: return
-        if self.pause_event.is_set():
-            self.pause_event.clear()
-            self.btn_pause.config(text="▶", bg="#FFEB3B")
-            self.status_var.set("任务已暂停...")
-        else:
-            self.pause_event.set()
-            self.btn_pause.config(text="⏸", bg="SystemButtonFace")
-            self.status_var.set("任务继续执行中...")
-
-    def stop_task(self):
-        if not self.is_running: return
-        if messagebox.askyesno("确认终止", "确定要停止当前的 AI 扫描任务吗？"):
-            self.stop_flag = True
-            self.pause_event.set() 
-            self.status_var.set("正在停止任务...")
-
-    def _set_ui_state_running(self, is_running):
-        self.is_running = is_running
-        if is_running:
-            self.btn_start_ai.config(state=tk.DISABLED)
+    def _set_ui_state_busy(self, is_ai_running=False):
+        """任务开始时的 UI 状态：锁定所有，根据类型决定是否开放暂停/停止"""
+        self.is_running = True
+        self._toggle_inputs(False) # 先全锁
+        
+        if is_ai_running:
+            # 如果是 AI 任务，解锁暂停和停止
             self.btn_pause.config(state=tk.NORMAL, text="⏸", bg="SystemButtonFace")
             self.btn_stop.config(state=tk.NORMAL)
         else:
-            self.btn_start_ai.config(state=tk.NORMAL)
-            self.btn_pause.config(state=tk.DISABLED, text="⏸", bg="SystemButtonFace")
+            # 如果是扫描或删除任务，暂停停止也不让用
+            self.btn_pause.config(state=tk.DISABLED)
             self.btn_stop.config(state=tk.DISABLED)
-            self.pause_event.set()
-            self.stop_flag = False
+
+    def _set_ui_state_idle(self):
+        """任务结束时的 UI 状态：解锁所有"""
+        self.is_running = False
+        self.stop_flag = False
+        self.pause_event.set()
+        self._toggle_inputs(True)
+        self.btn_pause.config(state=tk.DISABLED)
+        self.btn_stop.config(state=tk.DISABLED)
+
+    # ----------------- 业务逻辑 -----------------
 
     def select_folder(self):
         path = filedialog.askdirectory()
         if path: self.path_var.set(path)
 
     def search_files(self):
-        self.status_var.set("搜索中...")
+        self.status_var.set("正在扫描文件...")
         self.progress['mode'] = 'indeterminate'
         self.progress.start()
+        # 锁定 UI
+        self._set_ui_state_busy(is_ai_running=False)
         threading.Thread(target=self._search_thread, daemon=True).start()
 
     def _search_thread(self):
         target = self.path_var.get()
-        if not target: return
+        if not target: 
+            self.root.after(0, self._set_ui_state_idle)
+            return
+
+        # 清空列表
         self.root.after(0, lambda: [self.tree.delete(i) for i in self.tree.get_children()])
         self.checkbox_vars.clear()
+        
+        count = 0
         for root, file in self.file_manager.scan_directory(target):
             self.root.after(0, self._add_item, root, file)
-        self.root.after(0, lambda: [self.progress.stop(), self.status_var.set("搜索完成")])
+            count += 1
+            
+        self.root.after(0, lambda: [self.progress.stop(), self.status_var.set(f"扫描完成，共 {count} 个文件")])
+        self.root.after(0, self._set_ui_state_idle)
 
     def _add_item(self, root, file):
         item_id = self.tree.insert('', 'end', values=("", file, "--", os.path.basename(root), os.path.join(root, file)))
@@ -417,18 +404,16 @@ class UnifiedApp:
         items = self.tree.get_children()
         if not items: return
         
-        try:
-            scan_frames = int(self.preview_count_var.get())
-        except:
-            scan_frames = 3
-
+        try: scan_frames = int(self.preview_count_var.get())
+        except: scan_frames = 3
         current_conf = self.conf_scale.get()
-        msg = f"准备运行 AI 初筛。\n\n• 采样帧数: {scan_frames}\n• 灵敏度: {current_conf}\n\n确认开始？"
-        if not messagebox.askyesno("确认", msg): return
+
+        if not messagebox.askyesno("确认", f"开始 AI 初筛 (帧数:{scan_frames})？"): return
 
         self.stop_flag = False
         self.pause_event.set()
-        self._set_ui_state_running(True)
+        # 锁定 UI (允许暂停停止)
+        self._set_ui_state_busy(is_ai_running=True)
         self.progress['mode'] = 'determinate'
         self.progress['maximum'] = len(items)
         threading.Thread(target=self._ai_scan_thread, args=(items, scan_frames), daemon=True).start()
@@ -436,8 +421,6 @@ class UnifiedApp:
     def _ai_scan_thread(self, items, scan_frames):
         thresh = self.threshold_var.get()
         ai_conf = self.conf_scale.get()
-        
-        processed_count = 0
         
         for i, iid in enumerate(items):
             if self.stop_flag:
@@ -448,18 +431,14 @@ class UnifiedApp:
             path = self.tree.item(iid, 'values')[4]
             try:
                 _, ratio = self.video_processor.extract_preview_data(path, scan_frames, 100, ai_conf)
-                
                 is_waste = ratio < thresh
                 self.root.after(0, lambda id=iid, r=ratio, chk=is_waste: self._update_ai_result(id, r, chk))
-            except Exception as e:
-                print(f"Error analyzing {path}: {e}")
+            except: pass
+            
+            self.root.after(0, lambda v=i+1: self.progress.configure(value=v))
 
-            processed_count += 1
-            self.root.after(0, lambda v=processed_count: self.progress.configure(value=v))
-
-        self.root.after(0, lambda: self._set_ui_state_running(False))
-        final_msg = f"分析完成！\n\n已处理: {processed_count}/{len(items)}\n现在请使用【阈值重选】功能筛选废片。"
-        self.root.after(0, lambda: messagebox.showinfo("结果", final_msg))
+        self.root.after(0, self._set_ui_state_idle)
+        self.root.after(0, lambda: messagebox.showinfo("结果", "AI 分析完成"))
 
     def _update_ai_result(self, iid, ratio, check):
         if not self.tree.exists(iid): return 
@@ -468,71 +447,127 @@ class UnifiedApp:
         self.checkbox_vars[iid].set(check)
         self.update_checkbox_display(iid)
 
-    def on_tree_select(self, event):
-        sel = self.tree.selection()
-        if not sel: return
-        path = self.tree.item(sel[-1], 'values')[4]
-        self.update_preview(path)
+    # --- 筛选与删除 (核心修改：多线程删除 + 仅更新 UI 不重扫) ---
 
-    def update_preview(self, path):
-        if self.current_filepath == path: return
-        self.current_filepath = path
-        for w in self.preview_content.winfo_children(): w.destroy()
-        tk.Label(self.preview_content, text="YOLO 分析中...", bg="#eeeeee").pack(pady=20)
-        
-        try: cnt = int(self.preview_count_var.get())
-        except: cnt = 3
-        
-        ai_conf = self.conf_scale.get()
-        w = max(self.preview_frame.winfo_width(), 400)
-        threading.Thread(target=self._preview_thread, args=(path, cnt, w, ai_conf), daemon=True).start()
-
-    def _preview_thread(self, path, cnt, w, ai_conf):
-        data, ratio = self.video_processor.extract_preview_data(path, cnt, w, ai_conf)
-        self.root.after(0, lambda: self._render_preview(data, ratio, w))
-        self.root.after(0, lambda: self._sync_list_score(path, ratio))
-
-    def _sync_list_score(self, target_path, ratio):
+    def apply_threshold_selection(self):
+        try: thresh = self.threshold_var.get()
+        except: return
+        count = 0
         for iid in self.tree.get_children():
-            vals = self.tree.item(iid, 'values')
-            if vals[4] == target_path:
-                new_vals = (vals[0], vals[1], f"{ratio:.1f}%", vals[3], vals[4])
-                self.tree.item(iid, values=new_vals)
-                break
+            score_str = self.tree.item(iid, 'values')[2]
+            if "%" in score_str:
+                score = float(score_str.replace("%", ""))
+                should = score < thresh
+                self.checkbox_vars[iid].set(should)
+                self.update_checkbox_display(iid)
+                if should: count += 1
+        self.status_var.set(f"已勾选 {count} 个含手率 < {thresh}% 的文件")
 
-    def _render_preview(self, data, ratio, current_width):
-        for w in self.preview_content.winfo_children(): w.destroy()
-        head = tk.Frame(self.preview_content, bg="#eeeeee")
-        head.pack(fill=tk.X, padx=5, pady=5)
-        color = "green" if ratio >= self.threshold_var.get() else "red"
-        tk.Label(head, text=f"YOLO 识别率: {ratio:.1f}%", fg=color, font=("bold", 12), bg="#eeeeee").pack(side=tk.LEFT)
-        tk.Label(head, text="(含彩色骨架)", font=("Arial", 8), fg="gray", bg="#eeeeee").pack(side=tk.RIGHT)
+    def _get_checked_items(self):
+        """返回被勾选的 (iid, filepath) 列表"""
+        return [(i, self.tree.item(i, 'values')[4]) for i, v in self.checkbox_vars.items() if v.get()]
+
+    def delete_selected_files(self):
+        checked = self._get_checked_items()
+        if not checked: return messagebox.showwarning("提示", "未勾选文件")
         
-        num_frames = len(data)
-        if num_frames == 0: return
+        if not messagebox.askyesno("确认", f"删除 {len(checked)} 个文件？\n(删除后将从列表中移除，不自动刷新)"): return
         
-        if current_width < 380: cols = 1
-        elif num_frames <= 1: cols = 1
-        elif num_frames <= 4: cols = 2
-        elif num_frames <= 9: cols = 3
-        elif num_frames <= 16: cols = 4
-        elif num_frames <= 25: cols = 5
-        else: cols = 6 # Max 30 frames
+        # 锁定 UI (不允许暂停)
+        self._set_ui_state_busy(is_ai_running=False)
+        self.status_var.set("正在删除文件...")
         
-        for i in range(0, num_frames, cols):
-            row = tk.Frame(self.preview_content, bg="#eeeeee")
-            row.pack(fill=tk.X)
-            for j in range(cols):
-                if i+j < num_frames:
-                    d = data[i+j]
-                    f = tk.Frame(row, bg="white", bd=1, relief="solid")
-                    f.pack(side=tk.LEFT, padx=5, pady=5, expand=True, fill=tk.BOTH)
-                    label_txt = f"{d['label']} {'(有人)' if d['has_hand'] else ''}"
-                    tk.Label(f, text=label_txt, fg="green" if d['has_hand'] else "black", bg="white").pack()
-                    l = tk.Label(f, image=d['img_tk'], bg="white")
-                    l.image = d['img_tk']
-                    l.pack()
-                    tk.Label(f, text=d['time'], bg="white").pack()
+        # 开启线程执行删除，避免界面卡死
+        threading.Thread(target=self._delete_files_thread, args=(checked,), daemon=True).start()
+
+    def _delete_files_thread(self, checked_items):
+        paths = [p for _, p in checked_items]
+        # 执行物理删除
+        success_count, errors = self.file_manager.delete_files(paths)
+        
+        # UI 更新逻辑移回主线程
+        self.root.after(0, lambda: self._post_delete_cleanup(checked_items, success_count, errors))
+
+    def _post_delete_cleanup(self, checked_items, count, errors):
+        # 仅移除被删除的条目，不重新扫描硬盘
+        for iid, path in checked_items:
+            # 简单检查：如果在 errors 里说明没删掉，就不移除 UI
+            # 这里简化逻辑：只要尝试删了，就从 UI 移除，或者只移除真正成功的
+            # 为了准确，我们假设没有报错的都成功了
+            if not any(os.path.basename(path) in e for e in errors):
+                if self.tree.exists(iid):
+                    self.tree.delete(iid)
+                    del self.checkbox_vars[iid]
+
+        # 恢复 UI
+        self._set_ui_state_idle()
+        
+        msg = f"成功删除 {count} 个文件。"
+        if errors: msg += f"\n失败 {len(errors)} 个 (可能被占用)。"
+        messagebox.showinfo("删除结果", msg)
+        self.status_var.set(msg.split('\n')[0])
+
+    def delete_selected_folders(self):
+        # 文件夹删除逻辑稍微复杂，因为 Treeview 是按文件列出的
+        # 这里为了稳定，我们先找到所有勾选文件对应的父文件夹
+        checked = self._get_checked_items()
+        if not checked: return messagebox.showwarning("提示", "未勾选任何文件")
+        
+        folders = set()
+        for _, path in checked:
+            folders.add(os.path.dirname(path))
+            
+        if not messagebox.askyesno("警告", f"将删除 {len(folders)} 个文件夹及其内部所有内容！\n确认继续？"): return
+
+        self._set_ui_state_busy(is_ai_running=False)
+        self.status_var.set("正在删除文件夹...")
+        
+        threading.Thread(target=self._delete_folders_thread, args=(list(folders),), daemon=True).start()
+
+    def _delete_folders_thread(self, folders):
+        count, errors = self.file_manager.delete_folders(folders)
+        self.root.after(0, lambda: self._post_folder_delete_cleanup(folders, count, errors))
+
+    def _post_folder_delete_cleanup(self, deleted_folders, count, errors):
+        # 遍历 Treeview，如果文件的父文件夹在已删除列表中，则移除该行
+        # 需要把 deleted_folders 里的路径标准化，防止路径斜杠不一致
+        norm_deleted = [os.path.normpath(f) for f in deleted_folders]
+        
+        items_to_remove = []
+        for iid in self.tree.get_children():
+            path = self.tree.item(iid, 'values')[4]
+            folder = os.path.dirname(path)
+            if os.path.normpath(folder) in norm_deleted:
+                items_to_remove.append(iid)
+        
+        for iid in items_to_remove:
+            self.tree.delete(iid)
+            if iid in self.checkbox_vars: del self.checkbox_vars[iid]
+
+        self._set_ui_state_idle()
+        messagebox.showinfo("删除结果", f"已删除 {count} 个文件夹。")
+
+    # --- 杂项 ---
+
+    def stop_task(self):
+        """[修复补回] 终止当前任务"""
+        if not self.is_running: return
+        
+        # 弹出确认框
+        if messagebox.askyesno("确认终止", "确定要停止当前的 AI 扫描任务吗？"):
+            self.stop_flag = True
+            self.pause_event.set()  # 确保如果处于暂停状态也能立刻唤醒线程去结束
+            self.status_var.set("正在停止任务...")
+    def toggle_pause(self):
+        if not self.is_running: return
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+            self.btn_pause.config(text="▶", bg="#FFEB3B")
+            self.status_var.set("任务已暂停...")
+        else:
+            self.pause_event.set()
+            self.btn_pause.config(text="⏸", bg="SystemButtonFace")
+            self.status_var.set("任务继续执行中...")
 
     def on_tree_click(self, event):
         if self.tree.identify_region(event.x, event.y) == "cell":
@@ -552,28 +587,43 @@ class UnifiedApp:
         vals = self.tree.item(iid, 'values')
         self.tree.item(iid, values=("✓" if v else "",) + vals[1:], tags=('checked_item' if v else 'normal_item',))
 
-    def _get_checked_paths(self):
-        return [self.tree.item(i, 'values')[4] for i, v in self.checkbox_vars.items() if v.get()]
+    def on_tree_select(self, event):
+        sel = self.tree.selection()
+        if not sel: return
+        path = self.tree.item(sel[-1], 'values')[4]
+        if self.current_filepath == path: return
+        self.current_filepath = path
+        threading.Thread(target=self._preview_thread, args=(path,), daemon=True).start()
 
-    def delete_selected_files(self):
-        paths = self._get_checked_paths()
-        if not paths: return messagebox.showwarning("提示", "未勾选文件")
-        if messagebox.askyesno("确认", f"删除 {len(paths)} 个文件？"):
-            self.file_manager.delete_files(paths)
-            self.search_files()
+    def _preview_thread(self, path):
+        try:
+            cnt = int(self.preview_count_var.get())
+            ai_conf = self.conf_scale.get()
+            data, ratio = self.video_processor.extract_preview_data(path, cnt, 400, ai_conf)
+            self.root.after(0, lambda: self._render_preview(data, ratio))
+        except: pass
 
-    def delete_selected_folders(self):
-        checked_ids = [i for i, v in self.checkbox_vars.items() if v.get()]
-        if not checked_ids: return messagebox.showwarning("提示", "未勾选任何文件")
-        folders = set()
-        for iid in checked_ids:
-            full_path = self.tree.item(iid, 'values')[4]
-            folders.add(os.path.dirname(full_path))
-        if messagebox.askyesno("重大警告", f"将删除 {len(folders)} 个文件夹及其内部所有内容！\n确认继续？"):
-            self.file_manager.delete_folders(list(folders))
-            self.search_files()
+    def _render_preview(self, data, ratio):
+        for w in self.preview_content.winfo_children(): w.destroy()
+        tk.Label(self.preview_content, text=f"AI 识别率: {ratio:.1f}%", font=("bold",12)).pack()
+        f_container = tk.Frame(self.preview_content)
+        f_container.pack()
+        cols = 3
+        if len(data) > 9: cols = 4
+        if len(data) > 16: cols = 5
+        
+        for i, d in enumerate(data):
+            f = tk.Frame(f_container, bd=1, relief="solid", padx=2, pady=2)
+            f.grid(row=i//cols, column=i%cols, padx=2, pady=2)
+            tk.Label(f, image=d['img_tk']).pack()
+            tk.Label(f, text=d['time']).pack()
+            f.image = d['img_tk']
 
 if __name__ == "__main__":
+    try:
+        from ctypes import windll
+        windll.shcore.SetProcessDpiAwareness(1)
+    except: pass
     root = tk.Tk()
     app = UnifiedApp(root)
     root.mainloop()
