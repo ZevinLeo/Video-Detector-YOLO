@@ -210,7 +210,7 @@ class VideoProcessor:
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("YOLO 智能视频筛选器 v3.7 - 全局滚轮优化版")
+        self.root.title("YOLO 智能视频筛选器 v3.9 - 滚动逻辑与边界优化版")
         self.root.geometry("1400x950")
         
         self.current_filepath = None
@@ -285,7 +285,7 @@ class UnifiedApp:
         self.preview_count_var = tk.StringVar(value="3")
         self.combo_frames = ttk.Combobox(f_row2, textvariable=self.preview_count_var, values=[str(i) for i in range(1, 31)], width=3)
         self.combo_frames.pack(side=tk.LEFT, padx=(0,10))
-        tk.Label(f_row2, text="灵敏度:").pack(side=tk.LEFT)
+        tk.Label(f_row2, text="精准度:").pack(side=tk.LEFT)
         self.conf_var = tk.DoubleVar(value=0.15)
         self.conf_scale = tk.Scale(f_row2, variable=self.conf_var, from_=0.01, to=0.95, resolution=0.01, orient=tk.HORIZONTAL, length=100, width=15, showvalue=0)
         self.conf_scale.pack(side=tk.LEFT, padx=2)
@@ -370,11 +370,17 @@ class UnifiedApp:
         self.preview_scroll.pack(side="right", fill="y")
         self.preview_canvas.configure(yscrollcommand=self.preview_scroll.set)
 
-        # [修复] 预览区滚轮支持
+        # [修复] 预览区滚轮支持 (带边界检查)
         def _preview_scroll(event):
-            self.preview_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            current = self.preview_canvas.yview()
+            scroll_unit = int(-1 * (event.delta / 120))
+            if scroll_unit == 0: return
+            if scroll_unit < 0 and current[0] <= 0: return # 顶端禁止上滑
+            if scroll_unit > 0 and current[1] >= 1: return # 底端禁止下滑
+            self.preview_canvas.yview_scroll(scroll_unit, "units")
+            
         self.preview_canvas.bind("<MouseWheel>", _preview_scroll)
-        self.preview_content.bind("<MouseWheel>", _preview_scroll) # 确保鼠标放在图片上也能滚
+        self.preview_content.bind("<MouseWheel>", _preview_scroll)
 
         # 状态栏
         bottom_bar = tk.Frame(self.root, bd=1, relief=tk.SUNKEN)
@@ -387,7 +393,55 @@ class UnifiedApp:
         self.progress = ttk.Progressbar(bottom_bar, mode='determinate')
         self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20)
 
-    # ----------------- 弹窗管理逻辑 -----------------
+    # ----------------- 弹窗管理逻辑 (核心修复) -----------------
+
+    def _create_scrollable_canvas(self, parent_frame):
+        """通用方法：创建一个带滚动条的 Canvas 区域，修复小窗口不显示滚动条的问题 + 滚动逻辑优化"""
+        # 1. 滚动条 (先 pack 避免被挤出)
+        scrollbar = ttk.Scrollbar(parent_frame, orient="vertical")
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # 2. Canvas
+        canvas = tk.Canvas(parent_frame, bg="white")
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # 3. 关联
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.configure(command=canvas.yview)
+        
+        # 4. 内部内容 Frame
+        scrollable_frame = tk.Frame(canvas, bg="white")
+        
+        # 5. 绑定配置事件
+        def _on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        
+        scrollable_frame.bind("<Configure>", _on_frame_configure)
+        
+        # 6. 创建窗口
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        
+        # 7. [核心优化] 绑定滚轮 + 边界检查
+        def _on_mousewheel(event):
+            # 获取当前位置
+            current = canvas.yview()
+            # 计算滚动方向
+            scroll_unit = int(-1 * (event.delta / 120))
+            if scroll_unit == 0: return
+
+            # 边界检查：
+            # 如果要向上滚 (scroll_unit < 0) 且已经到顶 (current[0] <= 0) -> 不动
+            if scroll_unit < 0 and current[0] <= 0: return
+            
+            # 如果要向下滚 (scroll_unit > 0) 且已经到底 (current[1] >= 1) -> 不动
+            if scroll_unit > 0 and current[1] >= 1: return
+
+            canvas.yview_scroll(scroll_unit, "units")
+        
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
+        
+        return canvas, scrollable_frame, _on_mousewheel
 
     def open_model_manager(self):
         top = tk.Toplevel(self.root)
@@ -397,27 +451,21 @@ class UnifiedApp:
         paned = tk.PanedWindow(top, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
+        # === 左侧：模型库 ===
         frame_left = tk.LabelFrame(paned, text="1. 模型库 (勾选加载)", padx=5, pady=5)
         paned.add(frame_left, width=300)
-        canvas_l = tk.Canvas(frame_left)
-        scroll_l = ttk.Scrollbar(frame_left, command=canvas_l.yview)
-        content_l = tk.Frame(canvas_l)
-        content_l.bind("<Configure>", lambda e: canvas_l.configure(scrollregion=canvas_l.bbox("all")))
-        canvas_l.create_window((0,0), window=content_l, anchor="nw")
-        canvas_l.configure(yscrollcommand=scroll_l.set)
-        canvas_l.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_l.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # [修复] 左侧列表滚轮支持
-        def _left_scroll(event):
-            canvas_l.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas_l.bind("<MouseWheel>", _left_scroll)
-        content_l.bind("<MouseWheel>", _left_scroll)
-
+        # 使用通用方法创建滚动区域
+        _, content_l, wheel_func = self._create_scrollable_canvas(frame_left)
+        
+        # === 右侧：类别筛选 ===
         frame_right = tk.LabelFrame(paned, text="2. 类别筛选 (配置选中模型的类别)", padx=5, pady=5)
         paned.add(frame_right, width=500)
+        
         self.lbl_right_header = tk.Label(frame_right, text="请先在左侧点击模型名称...", font=("Arial", 10, "bold"), fg="gray")
         self.lbl_right_header.pack(fill=tk.X, pady=5)
+        
+        # 右侧也需要一个容器来放搜索栏和列表
         self.frame_classes_container = tk.Frame(frame_right)
         self.frame_classes_container.pack(fill=tk.BOTH, expand=True)
         
@@ -427,6 +475,7 @@ class UnifiedApp:
         self.temp_class_vars = {} 
         self.current_editing_model = None
         
+        # 填充左侧列表
         files = [f for f in os.listdir("models") if f.endswith(".pt")]
         if not files: tk.Label(content_l, text="未找到 .pt 文件").pack(pady=20)
         
@@ -434,13 +483,19 @@ class UnifiedApp:
             is_checked = f in self.selected_models
             var = tk.BooleanVar(value=is_checked)
             self.temp_model_vars[f] = var
-            row = tk.Frame(content_l, bd=1, relief=tk.RIDGE)
+            row = tk.Frame(content_l, bd=1, relief=tk.RIDGE, bg="white")
             row.pack(fill=tk.X, pady=2)
-            tk.Checkbutton(row, variable=var).pack(side=tk.LEFT)
-            btn = tk.Button(row, text=f, anchor="w", relief=tk.FLAT, command=lambda m=f: self._load_classes_to_right_panel(m))
+            
+            # 绑定滚轮到所有子控件
+            row.bind("<MouseWheel>", wheel_func)
+            
+            chk = tk.Checkbutton(row, variable=var, bg="white")
+            chk.pack(side=tk.LEFT)
+            chk.bind("<MouseWheel>", wheel_func)
+            
+            btn = tk.Button(row, text=f, anchor="w", relief=tk.FLAT, bg="white", command=lambda m=f: self._load_classes_to_right_panel(m))
             btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            # 绑定按钮滚轮
-            btn.bind("<MouseWheel>", _left_scroll)
+            btn.bind("<MouseWheel>", wheel_func)
 
     def _load_classes_to_right_panel(self, model_name):
         self.current_editing_model = model_name
@@ -490,35 +545,11 @@ class UnifiedApp:
         tk.Button(tool_frame, text="全选", command=lambda: toggle_all(True), width=8, bg="#e8f5e9").pack(side=tk.LEFT, padx=2)
         tk.Button(tool_frame, text="全不选", command=lambda: toggle_all(False), width=8, bg="#ffebee").pack(side=tk.LEFT, padx=2)
 
-        # 3. 滚动列表区域 (Canvas + Scrollbar)
+        # 3. 滚动列表区域 (使用通用方法)
         list_container = tk.Frame(self.frame_classes_container)
         list_container.pack(fill=tk.BOTH, expand=True, pady=5)
-
-        canvas = tk.Canvas(list_container, bg="white")
-        scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
         
-        # 滚动内容层
-        scrollable_frame = tk.Frame(canvas, bg="white")
-        
-        # 绑定大小变化以更新滚动区域
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # === 关键：绑定鼠标滚轮 ===
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        # 绑定到 Canvas 和内部 Frame
-        canvas.bind("<MouseWheel>", _on_mousewheel)
-        scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
+        _, scrollable_frame, wheel_func = self._create_scrollable_canvas(list_container)
 
         # ================= 渲染与搜索逻辑 =================
         
@@ -545,7 +576,7 @@ class UnifiedApp:
                 chk.grid(row=row, column=col, sticky="ew", padx=5, pady=2)
                 
                 # 绑定滚轮事件到每个组件上
-                chk.bind("<MouseWheel>", _on_mousewheel)
+                chk.bind("<MouseWheel>", wheel_func)
                 
                 # 双列布局
                 col += 1
