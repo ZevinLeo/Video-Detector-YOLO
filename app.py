@@ -210,7 +210,7 @@ class VideoProcessor:
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("YOLO 智能视频筛选器 v3.9 - 滚动逻辑与边界优化版")
+        self.root.title("智能视频筛选器 v2.0           作者：倪梓纹")
         self.root.geometry("1400x950")
         
         self.current_filepath = None
