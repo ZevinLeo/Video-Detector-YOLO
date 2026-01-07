@@ -204,13 +204,13 @@ class VideoProcessor:
         return frames_data, ratio
 
 # =========================================================================
-# 模块 3: 全功能 UI (重点修改部分)
+# 模块 3: 全功能 UI
 # =========================================================================
 
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("YOLO 智能视频筛选器 v3.5 - 视觉交互优化版")
+        self.root.title("YOLO 智能视频筛选器 v3.7 - 全局滚轮优化版")
         self.root.geometry("1400x950")
         
         self.current_filepath = None
@@ -355,10 +355,7 @@ class UnifiedApp:
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
         # === 关键修改：事件绑定 ===
-        # 1. 选中行触发预览 (包括键盘上下键)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select_preview)
-        
-        # 2. 鼠标抬起事件 (处理点击勾选逻辑)
         self.tree.bind("<ButtonRelease-1>", self.on_tree_click_release)
 
         # 预览
@@ -373,6 +370,12 @@ class UnifiedApp:
         self.preview_scroll.pack(side="right", fill="y")
         self.preview_canvas.configure(yscrollcommand=self.preview_scroll.set)
 
+        # [修复] 预览区滚轮支持
+        def _preview_scroll(event):
+            self.preview_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        self.preview_canvas.bind("<MouseWheel>", _preview_scroll)
+        self.preview_content.bind("<MouseWheel>", _preview_scroll) # 确保鼠标放在图片上也能滚
+
         # 状态栏
         bottom_bar = tk.Frame(self.root, bd=1, relief=tk.SUNKEN)
         bottom_bar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -384,7 +387,7 @@ class UnifiedApp:
         self.progress = ttk.Progressbar(bottom_bar, mode='determinate')
         self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20)
 
-    # ----------------- 弹窗管理逻辑 (保持不变) -----------------
+    # ----------------- 弹窗管理逻辑 -----------------
 
     def open_model_manager(self):
         top = tk.Toplevel(self.root)
@@ -405,6 +408,12 @@ class UnifiedApp:
         canvas_l.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll_l.pack(side=tk.RIGHT, fill=tk.Y)
         
+        # [修复] 左侧列表滚轮支持
+        def _left_scroll(event):
+            canvas_l.yview_scroll(int(-1*(event.delta/120)), "units")
+        canvas_l.bind("<MouseWheel>", _left_scroll)
+        content_l.bind("<MouseWheel>", _left_scroll)
+
         frame_right = tk.LabelFrame(paned, text="2. 类别筛选 (配置选中模型的类别)", padx=5, pady=5)
         paned.add(frame_right, width=500)
         self.lbl_right_header = tk.Label(frame_right, text="请先在左侧点击模型名称...", font=("Arial", 10, "bold"), fg="gray")
@@ -428,13 +437,19 @@ class UnifiedApp:
             row = tk.Frame(content_l, bd=1, relief=tk.RIDGE)
             row.pack(fill=tk.X, pady=2)
             tk.Checkbutton(row, variable=var).pack(side=tk.LEFT)
-            tk.Button(row, text=f, anchor="w", relief=tk.FLAT, command=lambda m=f: self._load_classes_to_right_panel(m)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            btn = tk.Button(row, text=f, anchor="w", relief=tk.FLAT, command=lambda m=f: self._load_classes_to_right_panel(m))
+            btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            # 绑定按钮滚轮
+            btn.bind("<MouseWheel>", _left_scroll)
 
     def _load_classes_to_right_panel(self, model_name):
         self.current_editing_model = model_name
         self.lbl_right_header.config(text=f"正在配置: [{model_name}] 的检测类别", fg="blue")
+        
+        # 清空右侧容器
         for w in self.frame_classes_container.winfo_children(): w.destroy()
         
+        # 读取类别数据
         loading_lbl = tk.Label(self.frame_classes_container, text="读取元数据...")
         loading_lbl.pack(pady=20)
         self.root.update()
@@ -446,18 +461,7 @@ class UnifiedApp:
             tk.Label(self.frame_classes_container, text="无法读取类别").pack()
             return
 
-        canvas = tk.Canvas(self.frame_classes_container)
-        scrollbar = ttk.Scrollbar(self.frame_classes_container, command=canvas.yview)
-        content = tk.Frame(canvas)
-        content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0,0), window=content, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        tool_frame = tk.Frame(content)
-        tool_frame.pack(fill=tk.X, pady=5)
-        
+        # --- 初始化变量逻辑 ---
         if model_name not in self.temp_class_vars:
             self.temp_class_vars[model_name] = {}
             saved_ids = self.active_class_filters.get(model_name, None)
@@ -465,24 +469,99 @@ class UnifiedApp:
                 is_on = (saved_ids is None) or (cid in saved_ids)
                 self.temp_class_vars[model_name][cid] = tk.BooleanVar(value=is_on)
 
+        # ================= UI 布局构建 =================
+        
+        # 1. 搜索栏区域
+        search_frame = tk.Frame(self.frame_classes_container, pady=5)
+        search_frame.pack(fill=tk.X)
+        tk.Label(search_frame, text="🔍 搜索类别: ").pack(side=tk.LEFT)
+        
+        search_var = tk.StringVar()
+        entry_search = tk.Entry(search_frame, textvariable=search_var)
+        entry_search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        # 2. 工具栏区域 (全选/全不选)
+        tool_frame = tk.Frame(self.frame_classes_container, pady=2)
+        tool_frame.pack(fill=tk.X)
+        
         def toggle_all(state):
             for v in self.temp_class_vars[model_name].values(): v.set(state)
-
-        tk.Button(tool_frame, text="全选", command=lambda: toggle_all(True), width=8).pack(side=tk.LEFT, padx=2)
-        tk.Button(tool_frame, text="全不选", command=lambda: toggle_all(False), width=8).pack(side=tk.LEFT, padx=2)
-
-        grid_frame = tk.Frame(content)
-        grid_frame.pack(fill=tk.BOTH, expand=True)
         
-        row, col = 0, 0
-        for cid, cname in classes.items():
-            var = self.temp_class_vars[model_name][cid]
-            chk = tk.Checkbutton(grid_frame, text=f"{cid}: {cname}", variable=var, anchor="w")
-            chk.grid(row=row, column=col, sticky="w", padx=10, pady=2)
-            col += 1
-            if col > 2: 
-                col = 0
-                row += 1
+        tk.Button(tool_frame, text="全选", command=lambda: toggle_all(True), width=8, bg="#e8f5e9").pack(side=tk.LEFT, padx=2)
+        tk.Button(tool_frame, text="全不选", command=lambda: toggle_all(False), width=8, bg="#ffebee").pack(side=tk.LEFT, padx=2)
+
+        # 3. 滚动列表区域 (Canvas + Scrollbar)
+        list_container = tk.Frame(self.frame_classes_container)
+        list_container.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        canvas = tk.Canvas(list_container, bg="white")
+        scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
+        
+        # 滚动内容层
+        scrollable_frame = tk.Frame(canvas, bg="white")
+        
+        # 绑定大小变化以更新滚动区域
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # === 关键：绑定鼠标滚轮 ===
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        # 绑定到 Canvas 和内部 Frame
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
+
+        # ================= 渲染与搜索逻辑 =================
+        
+        def refresh_list(*args):
+            # 1. 清除旧列表
+            for widget in scrollable_frame.winfo_children():
+                widget.destroy()
+            
+            keyword = search_var.get().lower()
+            row, col = 0, 0
+            
+            # 2. 遍历并筛选
+            for cid, cname in classes.items():
+                display_text = f"{cid}: {cname}"
+                
+                # 搜索过滤
+                if keyword and (keyword not in str(cid) and keyword not in cname.lower()):
+                    continue
+
+                var = self.temp_class_vars[model_name][cid]
+                
+                # 创建复选框
+                chk = tk.Checkbutton(scrollable_frame, text=display_text, variable=var, anchor="w", bg="white")
+                chk.grid(row=row, column=col, sticky="ew", padx=5, pady=2)
+                
+                # 绑定滚轮事件到每个组件上
+                chk.bind("<MouseWheel>", _on_mousewheel)
+                
+                # 双列布局
+                col += 1
+                if col > 1: # 2列
+                    col = 0
+                    row += 1
+            
+            # 配置列权重
+            scrollable_frame.grid_columnconfigure(0, weight=1)
+            scrollable_frame.grid_columnconfigure(1, weight=1)
+
+        # 监听搜索框输入
+        search_var.trace("w", refresh_list)
+        
+        # 初始化显示
+        refresh_list()
 
     def _save_manager_config(self, window):
         new_selected = set()
@@ -833,7 +912,6 @@ class UnifiedApp:
                 self.update_checkbox_display(row_id)
             else:
                 # 点击其他列：不做勾选操作
-                # (Treeview 原生机制会自动处理选中行，并触发 <<TreeviewSelect>> 进行预览)
                 pass
 
     def update_checkbox_display(self, iid):
@@ -853,10 +931,6 @@ class UnifiedApp:
         self.tree.item(iid, values=new_vals, tags=(tag,))
 
     def on_tree_select_preview(self, event):
-        """
-        专门处理预览逻辑。
-        无论是鼠标点击行(非勾选列)，还是键盘上下键，都会触发此事件。
-        """
         sel = self.tree.selection()
         if not sel: return
         path = self.tree.item(sel[-1], 'values')[4] # 假设路径在第5列
