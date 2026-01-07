@@ -1,13 +1,52 @@
 import os
+import sys
+
+# =========================================================================
+# 0. 核心环境引导 (必须放在 import torch 之前)
+# =========================================================================
+def force_load_internal_cuda():
+    """
+    强制 Windows 优先加载软件内部打包的 CUDA/cuDNN 库，
+    防止与用户系统环境变量中的 CUDA 版本冲突 (DLL Hell)。
+    """
+    if sys.platform == 'win32':
+        # 获取运行时临时目录 (PyInstaller 解压目录) 或 当前脚本目录
+        base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        
+        # 定义需要强制加载的 DLL 路径 (适配 torch 和 nvidia 库)
+        paths_to_add = [
+            base_path,
+            os.path.join(base_path, 'torch', 'lib'),
+            os.path.join(base_path, 'nvidia', 'cuda_runtime', 'bin'),
+            os.path.join(base_path, 'nvidia', 'cudnn', 'bin'),
+            os.path.join(base_path, 'nvidia', 'cublas', 'bin'),
+        ]
+
+        # 将路径加入 DLL 搜索目录 (Python 3.8+ 必须)
+        for p in paths_to_add:
+            if os.path.exists(p):
+                try:
+                    os.add_dll_directory(p)
+                except Exception:
+                    pass
+        
+        # 同时修改 PATH 环境变量 (双重保险)
+        os.environ['PATH'] = ';'.join(paths_to_add) + ';' + os.environ['PATH']
+
+# 执行环境修复
+force_load_internal_cuda()
+
+# =========================================================================
+# 正常导入其他库
+# =========================================================================
 import shutil
 import threading
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 from PIL import Image, ImageTk
 import cv2
-import torch
+import torch # 必须在 force_load_internal_cuda 之后导入
 import time
-import sys
 
 # =========================================================================
 # 常量定义
@@ -16,7 +55,7 @@ CHECKED_ICON = "☑"
 UNCHECKED_ICON = "☐"
 
 # =========================================================================
-# 模块 1: AI 智能引擎 (保持不变)
+# 模块 1: AI 智能引擎
 # =========================================================================
 
 class YoloDetector:
@@ -114,7 +153,7 @@ class YoloDetector:
         return has_target, annotated_frame
 
 # =========================================================================
-# 模块 2: 核心逻辑层 (保持不变)
+# 模块 2: 核心逻辑层
 # =========================================================================
 
 class FileManager:
@@ -210,7 +249,7 @@ class VideoProcessor:
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("智能视频筛选器 v2.0           作者：倪梓纹")
+        self.root.title("YOLO 智能视频筛选器 v4.0 - 终极增强版")
         self.root.geometry("1400x950")
         
         self.current_filepath = None
@@ -285,7 +324,7 @@ class UnifiedApp:
         self.preview_count_var = tk.StringVar(value="3")
         self.combo_frames = ttk.Combobox(f_row2, textvariable=self.preview_count_var, values=[str(i) for i in range(1, 31)], width=3)
         self.combo_frames.pack(side=tk.LEFT, padx=(0,10))
-        tk.Label(f_row2, text="精准度:").pack(side=tk.LEFT)
+        tk.Label(f_row2, text="灵敏度:").pack(side=tk.LEFT)
         self.conf_var = tk.DoubleVar(value=0.15)
         self.conf_scale = tk.Scale(f_row2, variable=self.conf_var, from_=0.01, to=0.95, resolution=0.01, orient=tk.HORIZONTAL, length=100, width=15, showvalue=0)
         self.conf_scale.pack(side=tk.LEFT, padx=2)
@@ -354,7 +393,7 @@ class UnifiedApp:
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # === 关键修改：事件绑定 ===
+        # === 事件绑定 ===
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select_preview)
         self.tree.bind("<ButtonRelease-1>", self.on_tree_click_release)
 
@@ -370,7 +409,7 @@ class UnifiedApp:
         self.preview_scroll.pack(side="right", fill="y")
         self.preview_canvas.configure(yscrollcommand=self.preview_scroll.set)
 
-        # [修复] 预览区滚轮支持 (带边界检查)
+        # 预览区滚轮支持 (带边界检查)
         def _preview_scroll(event):
             current = self.preview_canvas.yview()
             scroll_unit = int(-1 * (event.delta / 120))
@@ -393,10 +432,10 @@ class UnifiedApp:
         self.progress = ttk.Progressbar(bottom_bar, mode='determinate')
         self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20)
 
-    # ----------------- 弹窗管理逻辑 (核心修复) -----------------
+    # ----------------- 弹窗管理逻辑 -----------------
 
     def _create_scrollable_canvas(self, parent_frame):
-        """通用方法：创建一个带滚动条的 Canvas 区域，修复小窗口不显示滚动条的问题 + 滚动逻辑优化"""
+        """通用方法：创建一个带滚动条的 Canvas 区域"""
         # 1. 滚动条 (先 pack 避免被挤出)
         scrollbar = ttk.Scrollbar(parent_frame, orient="vertical")
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -421,21 +460,13 @@ class UnifiedApp:
         # 6. 创建窗口
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         
-        # 7. [核心优化] 绑定滚轮 + 边界检查
+        # 7. 绑定滚轮 + 边界检查
         def _on_mousewheel(event):
-            # 获取当前位置
             current = canvas.yview()
-            # 计算滚动方向
             scroll_unit = int(-1 * (event.delta / 120))
             if scroll_unit == 0: return
-
-            # 边界检查：
-            # 如果要向上滚 (scroll_unit < 0) 且已经到顶 (current[0] <= 0) -> 不动
             if scroll_unit < 0 and current[0] <= 0: return
-            
-            # 如果要向下滚 (scroll_unit > 0) 且已经到底 (current[1] >= 1) -> 不动
             if scroll_unit > 0 and current[1] >= 1: return
-
             canvas.yview_scroll(scroll_unit, "units")
         
         canvas.bind("<MouseWheel>", _on_mousewheel)
