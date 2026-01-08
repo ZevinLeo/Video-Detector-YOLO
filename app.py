@@ -264,7 +264,7 @@ class VideoProcessor:
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("智能视频筛选器 v4.3")
+        self.root.title("智能视频筛选器 v1.2.0")
         self.root.geometry("1400x950")
         
         self.current_filepath = None
