@@ -33,8 +33,9 @@ def force_load_internal_cuda():
         # 同时修改 PATH 环境变量 (双重保险)
         os.environ['PATH'] = ';'.join(paths_to_add) + ';' + os.environ['PATH']
 
-# 执行环境修复
-force_load_internal_cuda()
+# 执行环境修复 (仅在打包环境中生效，或显式调用)
+if getattr(sys, 'frozen', False):
+    force_load_internal_cuda()
 
 # =========================================================================
 # 正常导入其他库
@@ -51,8 +52,8 @@ import time
 # =========================================================================
 # 常量定义
 # =========================================================================
-CHECKED_ICON = "☑"
-UNCHECKED_ICON = "☐"
+CHECKED_ICON = "⬛"  # U+2B1B (特大黑方块)
+UNCHECKED_ICON = "⬜" # U+2B1C (特大白方块)
 
 # =========================================================================
 # 模块 1: AI 智能引擎
@@ -194,6 +195,20 @@ class FileManager:
 class VideoProcessor:
     def __init__(self, detector):
         self.detector = detector
+    
+    @staticmethod
+    def get_duration(filepath):
+        try:
+            cap = cv2.VideoCapture(filepath)
+            if not cap.isOpened(): return 0
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            cap.release()
+            if fps > 0 and frames > 0:
+                return frames / fps
+            return 0
+        except:
+            return 0
 
     def extract_preview_data(self, filepath, count, target_width, ai_conf, draw_skeleton, class_filters):
         cap = cv2.VideoCapture(filepath)
@@ -249,7 +264,7 @@ class VideoProcessor:
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("智能视频筛选器 v1.1")
+        self.root.title("智能视频筛选器 v4.3")
         self.root.geometry("1400x950")
         
         self.current_filepath = None
@@ -264,6 +279,9 @@ class UnifiedApp:
         self.pause_event.set()
         self.stop_flag = False
         self.is_running = False
+
+        self.original_total_seconds = 0  
+        self.scan_root_folder_name = "未命名" 
         
         self.detector = YoloDetector()
         self.file_manager = FileManager()
@@ -286,9 +304,39 @@ class UnifiedApp:
 
     def _configure_styles(self):
         style = ttk.Style()
-        style.map("Treeview", background=[("selected", "#3a7ebf")], foreground=[("selected", "white")])
-        self.tree.tag_configure('checked_item', background='#E3F2FD', foreground='black')
-        self.tree.tag_configure('normal_item', background='white', foreground='black')
+        
+        # =========================================================
+        # 1. 核心：不强行设置主题，使用系统默认 (Windows Native)
+        # =========================================================
+        
+        # =========================================================
+        # 2. 列表主体设置 (只调字号和行高)
+        # =========================================================
+        style.configure("Treeview", 
+                        font=("Microsoft YaHei UI", 10), 
+                        rowheight=32
+                        )
+        
+        # =========================================================
+        # 3. 表头设置 (原生质感)
+        # =========================================================
+        style.configure("Treeview.Heading", 
+                        font=("Microsoft YaHei UI", 10)
+                        )
+        
+        # =========================================================
+        # 4. 选中与交互颜色 (保持选中不反色)
+        # =========================================================
+        style.map("Treeview", 
+                  background=[("selected", "#CCE8FF")], # 选中依然是浅蓝
+                  foreground=[("selected", "black")]    # 选中文字依然是黑
+                  )
+
+        # =========================================================
+        # 5. 行颜色 Tag
+        # =========================================================
+        self.tree.tag_configure('checked_item', background='#E3F2FD', foreground='black', font=("Microsoft YaHei UI", 10))
+        self.tree.tag_configure('normal_item', background='white', foreground='black', font=("Microsoft YaHei UI", 10))
 
     def _init_ui(self):
         top_frame = tk.Frame(self.root, pady=10)
@@ -304,6 +352,8 @@ class UnifiedApp:
         self.btn_select.pack(side=tk.LEFT, padx=2)
         self.btn_scan = tk.Button(path_group, text="🔍 扫描", command=self.search_files, bg="#4CAF50", fg="white", font=("Arial", 9, "bold"))
         self.btn_scan.pack(side=tk.LEFT, padx=5)
+        self.btn_stat = tk.Button(path_group, text="⏱ 统计时长", command=self.calc_total_duration, bg="#607D8B", fg="white")
+        self.btn_stat.pack(side=tk.LEFT, padx=2)
 
         # --- 区域 2: AI 参数 ---
         ai_group = tk.LabelFrame(top_frame, text="AI 智能参数", padx=10, pady=5)
@@ -324,7 +374,7 @@ class UnifiedApp:
         self.preview_count_var = tk.StringVar(value="3")
         self.combo_frames = ttk.Combobox(f_row2, textvariable=self.preview_count_var, values=[str(i) for i in range(1, 31)], width=3)
         self.combo_frames.pack(side=tk.LEFT, padx=(0,10))
-        tk.Label(f_row2, text="灵敏度:").pack(side=tk.LEFT)
+        tk.Label(f_row2, text="匹配度:").pack(side=tk.LEFT)
         self.conf_var = tk.DoubleVar(value=0.15)
         self.conf_scale = tk.Scale(f_row2, variable=self.conf_var, from_=0.01, to=0.95, resolution=0.01, orient=tk.HORIZONTAL, length=100, width=15, showvalue=0)
         self.conf_scale.pack(side=tk.LEFT, padx=2)
@@ -379,50 +429,80 @@ class UnifiedApp:
         cols = ("checkbox", "filename", "ai_score", "folder", "full_path")
         self.tree = ttk.Treeview(list_frame, columns=cols, show='headings')
         
-        # 优化列显示：checkbox 列居中
-        headers = [("✓", 40), ("文件名", 200), ("出现率", 80), ("父文件夹", 120), ("完整路径", 150)]
-        self.tree.heading("checkbox", text="✓")
-        self.tree.column("checkbox", width=40, anchor="center") # 居中对齐
+        headers = [("选择", 48), ("文件名", 200), ("出现率", 80), ("父文件夹", 120), ("完整路径", 150)]
         
+        self.tree.heading("checkbox", text="选择")
+        
+        self.tree.column("checkbox", 
+                         width=48, 
+                         minwidth=48, 
+                         stretch=False, 
+                         anchor="center"
+                         ) 
+# =========================================================
+# 修改区：其他列配置 (增加智能最小宽度锁定)
+# =========================================================
         for col, (txt, w) in zip(cols[1:], headers[1:]):
             self.tree.heading(col, text=txt)
-            self.tree.column(col, width=w)
             
+        # 算法：根据标题字数计算最小宽度
+        # 微软雅黑 10号字，每个汉字大约占用 20px，加上左右边距缓冲
+        # 例如 "父文件夹" (4字) -> minwidth 设为 100px 左右
+            min_w_limit = len(txt) * 25 
+            
+            self.tree.column(col, 
+                             width=w, 
+                             minwidth=min_w_limit, # <--- 关键修改：锁定最小宽度
+                             anchor="center"
+                             )
+            
+        # === 滚动条 1: 列表区 (使用 ttk.Scrollbar 保持原生) ===
         scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscroll=scroll.set)
         
-        # === 关键修改：修复滚动条布局 ===
-        # 先 Pack 滚动条（让它占据右侧位置），再 Pack 列表（让它填充剩余空间）
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # === 事件绑定 ===
+        # 事件绑定
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select_preview)
         self.tree.bind("<ButtonRelease-1>", self.on_tree_click_release)
 
-        # 预览
+        # 右键菜单
+        self.tree_menu = tk.Menu(self.root, tearoff=0)
+        self.tree_menu.add_command(label="▶ 播放视频", command=self.menu_play_video)
+        self.tree_menu.add_command(label="📂 打开所在文件夹", command=self.menu_open_folder)
+        self.tree_menu.add_separator() 
+        self.tree_menu.add_command(label="📋 复制完整路径", command=self.menu_copy_path)
+        self.tree.bind("<Button-3>", self.show_context_menu)
+        
+        # ------------------------------------------------------------------------
+        # 预览区 (右侧) - 核心修改：标题冻结与滚轮绑定
+        # ------------------------------------------------------------------------
         self.preview_frame = tk.Frame(paned, bg="#eeeeee")
         paned.add(self.preview_frame)
+
+        # 1. 冻结的标题 (放在 Canvas 外部，顶部)
+        self.lbl_preview_title = tk.Label(self.preview_frame, text="出现率: --%", font=("Microsoft YaHei UI", 12, "bold"), bg="#eeeeee", pady=10)
+        self.lbl_preview_title.pack(side=tk.TOP, fill=tk.X)
+
+        # 2. 滚动区域
         self.preview_canvas = tk.Canvas(self.preview_frame, bg="#eeeeee")
-        self.preview_scroll = tk.Scrollbar(self.preview_frame, orient="vertical", command=self.preview_canvas.yview)
+        
+        # === 滚动条 2: 预览区 ===
+        self.preview_scroll = ttk.Scrollbar(self.preview_frame, orient="vertical", command=self.preview_canvas.yview)
+        
         self.preview_content = tk.Frame(self.preview_canvas, bg="#eeeeee")
         self.preview_win = self.preview_canvas.create_window((0,0), anchor="nw", window=self.preview_content)
         self.preview_content.bind("<Configure>", lambda e: self.preview_canvas.configure(scrollregion=self.preview_canvas.bbox("all")))
-        self.preview_canvas.pack(side="left", fill="both", expand=True)
-        self.preview_scroll.pack(side="right", fill="y")
+        
+        # 布局
+        self.preview_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.preview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.preview_canvas.configure(yscrollcommand=self.preview_scroll.set)
 
-        # 预览区滚轮支持 (带边界检查)
-        def _preview_scroll(event):
-            current = self.preview_canvas.yview()
-            scroll_unit = int(-1 * (event.delta / 120))
-            if scroll_unit == 0: return
-            if scroll_unit < 0 and current[0] <= 0: return # 顶端禁止上滑
-            if scroll_unit > 0 and current[1] >= 1: return # 底端禁止下滑
-            self.preview_canvas.yview_scroll(scroll_unit, "units")
-            
-        self.preview_canvas.bind("<MouseWheel>", _preview_scroll)
-        self.preview_content.bind("<MouseWheel>", _preview_scroll)
+        # 滚轮事件绑定到主容器
+        self.preview_canvas.bind("<MouseWheel>", self._on_preview_mousewheel)
+        self.preview_content.bind("<MouseWheel>", self._on_preview_mousewheel)
 
         # 状态栏
         bottom_bar = tk.Frame(self.root, bd=1, relief=tk.SUNKEN)
@@ -439,31 +519,24 @@ class UnifiedApp:
 
     def _create_scrollable_canvas(self, parent_frame):
         """通用方法：创建一个带滚动条的 Canvas 区域"""
-        # 1. 滚动条 (先 pack 避免被挤出)
+        # === 滚动条 3: 弹窗 (保持 ttk.Scrollbar) ===
         scrollbar = ttk.Scrollbar(parent_frame, orient="vertical")
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # 2. Canvas
         canvas = tk.Canvas(parent_frame, bg="white")
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # 3. 关联
         canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.configure(command=canvas.yview)
         
-        # 4. 内部内容 Frame
         scrollable_frame = tk.Frame(canvas, bg="white")
         
-        # 5. 绑定配置事件
         def _on_frame_configure(event):
             canvas.configure(scrollregion=canvas.bbox("all"))
         
         scrollable_frame.bind("<Configure>", _on_frame_configure)
-        
-        # 6. 创建窗口
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         
-        # 7. 绑定滚轮 + 边界检查
         def _on_mousewheel(event):
             current = canvas.yview()
             scroll_unit = int(-1 * (event.delta / 120))
@@ -485,21 +558,17 @@ class UnifiedApp:
         paned = tk.PanedWindow(top, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # === 左侧：模型库 ===
         frame_left = tk.LabelFrame(paned, text="1. 模型库 (勾选加载)", padx=5, pady=5)
         paned.add(frame_left, width=300)
         
-        # 使用通用方法创建滚动区域
         _, content_l, wheel_func = self._create_scrollable_canvas(frame_left)
         
-        # === 右侧：类别筛选 ===
         frame_right = tk.LabelFrame(paned, text="2. 类别筛选 (配置选中模型的类别)", padx=5, pady=5)
         paned.add(frame_right, width=500)
         
         self.lbl_right_header = tk.Label(frame_right, text="请先在左侧点击模型名称...", font=("Arial", 10, "bold"), fg="gray")
         self.lbl_right_header.pack(fill=tk.X, pady=5)
         
-        # 右侧也需要一个容器来放搜索栏和列表
         self.frame_classes_container = tk.Frame(frame_right)
         self.frame_classes_container.pack(fill=tk.BOTH, expand=True)
         
@@ -509,7 +578,6 @@ class UnifiedApp:
         self.temp_class_vars = {} 
         self.current_editing_model = None
         
-        # 填充左侧列表
         files = [f for f in os.listdir("models") if f.endswith(".pt")]
         if not files: tk.Label(content_l, text="未找到 .pt 文件").pack(pady=20)
         
@@ -520,9 +588,7 @@ class UnifiedApp:
             row = tk.Frame(content_l, bd=1, relief=tk.RIDGE, bg="white")
             row.pack(fill=tk.X, pady=2)
             
-            # 绑定滚轮到所有子控件
             row.bind("<MouseWheel>", wheel_func)
-            
             chk = tk.Checkbutton(row, variable=var, bg="white")
             chk.pack(side=tk.LEFT)
             chk.bind("<MouseWheel>", wheel_func)
@@ -535,10 +601,8 @@ class UnifiedApp:
         self.current_editing_model = model_name
         self.lbl_right_header.config(text=f"正在配置: [{model_name}] 的检测类别", fg="blue")
         
-        # 清空右侧容器
         for w in self.frame_classes_container.winfo_children(): w.destroy()
         
-        # 读取类别数据
         loading_lbl = tk.Label(self.frame_classes_container, text="读取元数据...")
         loading_lbl.pack(pady=20)
         self.root.update()
@@ -550,7 +614,6 @@ class UnifiedApp:
             tk.Label(self.frame_classes_container, text="无法读取类别").pack()
             return
 
-        # --- 初始化变量逻辑 ---
         if model_name not in self.temp_class_vars:
             self.temp_class_vars[model_name] = {}
             saved_ids = self.active_class_filters.get(model_name, None)
@@ -558,9 +621,6 @@ class UnifiedApp:
                 is_on = (saved_ids is None) or (cid in saved_ids)
                 self.temp_class_vars[model_name][cid] = tk.BooleanVar(value=is_on)
 
-        # ================= UI 布局构建 =================
-        
-        # 1. 搜索栏区域
         search_frame = tk.Frame(self.frame_classes_container, pady=5)
         search_frame.pack(fill=tk.X)
         tk.Label(search_frame, text="🔍 搜索类别: ").pack(side=tk.LEFT)
@@ -569,7 +629,6 @@ class UnifiedApp:
         entry_search = tk.Entry(search_frame, textvariable=search_var)
         entry_search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-        # 2. 工具栏区域 (全选/全不选)
         tool_frame = tk.Frame(self.frame_classes_container, pady=2)
         tool_frame.pack(fill=tk.X)
         
@@ -579,53 +638,40 @@ class UnifiedApp:
         tk.Button(tool_frame, text="全选", command=lambda: toggle_all(True), width=8, bg="#e8f5e9").pack(side=tk.LEFT, padx=2)
         tk.Button(tool_frame, text="全不选", command=lambda: toggle_all(False), width=8, bg="#ffebee").pack(side=tk.LEFT, padx=2)
 
-        # 3. 滚动列表区域 (使用通用方法)
         list_container = tk.Frame(self.frame_classes_container)
         list_container.pack(fill=tk.BOTH, expand=True, pady=5)
         
         _, scrollable_frame, wheel_func = self._create_scrollable_canvas(list_container)
 
-        # ================= 渲染与搜索逻辑 =================
-        
         def refresh_list(*args):
-            # 1. 清除旧列表
             for widget in scrollable_frame.winfo_children():
                 widget.destroy()
             
             keyword = search_var.get().lower()
             row, col = 0, 0
             
-            # 2. 遍历并筛选
             for cid, cname in classes.items():
                 display_text = f"{cid}: {cname}"
                 
-                # 搜索过滤
                 if keyword and (keyword not in str(cid) and keyword not in cname.lower()):
                     continue
 
                 var = self.temp_class_vars[model_name][cid]
                 
-                # 创建复选框
                 chk = tk.Checkbutton(scrollable_frame, text=display_text, variable=var, anchor="w", bg="white")
                 chk.grid(row=row, column=col, sticky="ew", padx=5, pady=2)
                 
-                # 绑定滚轮事件到每个组件上
                 chk.bind("<MouseWheel>", wheel_func)
                 
-                # 双列布局
                 col += 1
-                if col > 1: # 2列
+                if col > 1:
                     col = 0
                     row += 1
             
-            # 配置列权重
             scrollable_frame.grid_columnconfigure(0, weight=1)
             scrollable_frame.grid_columnconfigure(1, weight=1)
 
-        # 监听搜索框输入
         search_var.trace("w", refresh_list)
-        
-        # 初始化显示
         refresh_list()
 
     def _save_manager_config(self, window):
@@ -664,19 +710,32 @@ class UnifiedApp:
     def _update_model_status_label(self):
         self.lbl_model_status.config(text=f"已选: {len(self.selected_models)}")
 
-    # ----------------- 响应式布局 -----------------
+    # ----------------- 响应式布局 & 滚动控制 -----------------
 
     def _on_window_resize(self, event):
         self.preview_canvas.itemconfig(self.preview_win, width=event.width)
         self._reflow_grid(event.width)
 
+    # 【新增】统一的滚轮事件处理
+    def _on_preview_mousewheel(self, event):
+        current = self.preview_canvas.yview()
+        scroll_unit = int(-1 * (event.delta / 120))
+        if scroll_unit == 0: return
+        if scroll_unit < 0 and current[0] <= 0: return # 顶端禁止上滑
+        if scroll_unit > 0 and current[1] >= 1: return # 底端禁止下滑
+        self.preview_canvas.yview_scroll(scroll_unit, "units")
+
     def _reflow_grid(self, container_width):
         if not self.cached_preview_data: return
         for widget in self.preview_content.winfo_children(): widget.destroy()
 
-        tk.Label(self.preview_content, text=f"出现率: {self.cached_ratio:.1f}%", font=("bold",12), bg="#eeeeee").pack(pady=(10,5))
+        # 更新顶部冻结标签的内容
+        self.lbl_preview_title.config(text=f"出现率: {self.cached_ratio:.1f}%")
+
         f_container = tk.Frame(self.preview_content, bg="#eeeeee")
         f_container.pack(fill=tk.X, padx=5)
+        # 绑定容器滚轮
+        f_container.bind("<MouseWheel>", self._on_preview_mousewheel)
 
         count = len(self.cached_preview_data)
         if count == 0: return
@@ -697,6 +756,9 @@ class UnifiedApp:
             f = tk.Frame(f_container, bd=1, relief="solid", padx=2, pady=2, bg="white")
             f.grid(row=i//cols, column=i%cols, padx=5, pady=5, sticky="nsew")
             
+            # 【新增】为 Frame 绑定滚轮
+            f.bind("<MouseWheel>", self._on_preview_mousewheel)
+
             pil_img = d['pil_img']
             w, h = pil_img.size
             item_h = int(item_w * h / w)
@@ -706,7 +768,13 @@ class UnifiedApp:
             l = tk.Label(f, image=tk_img, bg="white")
             l.image = tk_img 
             l.pack()
-            tk.Label(f, text=f"{d['label']} ({d['time']})", bg="white").pack()
+            # 【新增】为图片绑定滚轮
+            l.bind("<MouseWheel>", self._on_preview_mousewheel)
+
+            lbl_txt = tk.Label(f, text=f"{d['label']} ({d['time']})", bg="white")
+            lbl_txt.pack()
+            # 【新增】为文字绑定滚轮
+            lbl_txt.bind("<MouseWheel>", self._on_preview_mousewheel)
             
         for c in range(cols): f_container.grid_columnconfigure(c, weight=1)
 
@@ -771,19 +839,29 @@ class UnifiedApp:
             self.root.after(0, self._set_ui_state_idle)
             return
 
+        self.scan_root_folder_name = os.path.basename(os.path.normpath(target))
+        self.original_total_seconds = 0 
+
         self.root.after(0, lambda: [self.tree.delete(i) for i in self.tree.get_children()])
         self.checkbox_vars.clear()
         
         count = 0
+        
         for root, file in self.file_manager.scan_directory(target):
+            full_path = os.path.join(root, file)
+            duration = self.video_processor.get_duration(full_path)
+            self.original_total_seconds += duration
+            
             self.root.after(0, self._add_item, root, file)
             count += 1
+            self.root.after(0, lambda c=count: self.status_var.set(f"正在扫描: 已发现 {c} 个文件..."))
             
-        self.root.after(0, lambda: [self.progress.stop(), self.status_var.set(f"扫描完成，共 {count} 个文件")])
+        time_str = self._format_time(self.original_total_seconds)
+        final_msg = f"扫描完成: 共 {count} 个文件 | 总时长: {time_str}"
+        self.root.after(0, lambda: [self.progress.stop(), self.status_var.set(final_msg)])
         self.root.after(0, self._set_ui_state_idle)
 
     def _add_item(self, root, file):
-        # 默认使用 UNCHECKED_ICON
         item_id = self.tree.insert('', 'end', values=(UNCHECKED_ICON, file, "--", os.path.basename(root), os.path.join(root, file)))
         self.checkbox_vars[item_id] = tk.BooleanVar(value=False)
 
@@ -843,11 +921,9 @@ class UnifiedApp:
     def _update_ai_result(self, iid, ratio, check):
         if not self.tree.exists(iid): return 
         vals = self.tree.item(iid, 'values')
-        # 保持第一列为当前视觉状态
         current_icon = vals[0]
         self.tree.item(iid, values=(current_icon, vals[1], f"{ratio:.1f}%", vals[3], vals[4]))
         
-        # 自动勾选逻辑（如果你希望 AI 自动勾选，也要同步更新图标）
         self.checkbox_vars[iid].set(check)
         self.update_checkbox_display(iid)
 
@@ -951,17 +1027,14 @@ class UnifiedApp:
     # =========================================================
     
     def on_tree_click_release(self, event):
-        """鼠标抬起时触发，精准判断点击了哪里"""
         region = self.tree.identify("region", event.x, event.y)
         column = self.tree.identify_column(event.x)
         
         # 1. 判定表头点击 (Heading)
         if region == "heading":
             if column == "#1": # 只有点第一列的表头才全选
-                # 检查当前是否全选了
                 all_checked = all(v.get() for v in self.checkbox_vars.values())
                 new_state = not all_checked # 反转状态
-                
                 for iid, var in self.checkbox_vars.items():
                     var.set(new_state)
                     self.update_checkbox_display(iid)
@@ -976,33 +1049,22 @@ class UnifiedApp:
                 self.checkbox_vars[row_id].set(not current_val)
                 self.update_checkbox_display(row_id)
             else:
-                # 点击其他列：不做勾选操作
                 pass
 
     def update_checkbox_display(self, iid):
-        """根据 checkbox_vars 的状态更新图标"""
         if iid not in self.checkbox_vars: return
         v = self.checkbox_vars[iid].get()
         vals = self.tree.item(iid, 'values')
-        
-        # 使用常量图标
         icon = CHECKED_ICON if v else UNCHECKED_ICON
-        
-        # 更新第一列，保持其他列不变
         new_vals = (icon,) + vals[1:]
-        
-        # 同时应用背景色样式
         tag = 'checked_item' if v else 'normal_item'
         self.tree.item(iid, values=new_vals, tags=(tag,))
 
     def on_tree_select_preview(self, event):
         sel = self.tree.selection()
         if not sel: return
-        path = self.tree.item(sel[-1], 'values')[4] # 假设路径在第5列
-        
-        # 避免重复加载同一文件
+        path = self.tree.item(sel[-1], 'values')[4] 
         if self.current_filepath == path: return
-        
         self.current_filepath = path
         threading.Thread(target=self._preview_thread, args=(path,), daemon=True).start()
 
@@ -1019,6 +1081,133 @@ class UnifiedApp:
 
     def _render_preview_init(self):
         self._reflow_grid(self.preview_frame.winfo_width())
+
+    # =========================================================
+    # 右键菜单逻辑
+    # =========================================================
+
+    def show_context_menu(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            self.tree.selection_set(iid)
+            self.on_tree_select_preview(None) 
+            self.tree_menu.post(event.x_root, event.y_root)
+
+    def _get_current_path(self):
+        sel = self.tree.selection()
+        if not sel: return None
+        return self.tree.item(sel[0], 'values')[4]
+
+    def menu_play_video(self):
+        path = self._get_current_path()
+        if path and os.path.exists(path):
+            try:
+                os.startfile(path) 
+            except Exception as e:
+                messagebox.showerror("错误", f"无法播放：{str(e)}")
+
+    def menu_open_folder(self):
+        path = self._get_current_path()
+        if path: 
+            try:
+                abs_path = os.path.abspath(path)
+                norm_path = os.path.normpath(abs_path)
+                if not os.path.exists(norm_path):
+                    messagebox.showerror("错误", "文件不存在，可能已被删除或移动。")
+                    return
+                import subprocess
+                subprocess.run(['explorer', '/select,', norm_path])
+            except Exception as e:
+                messagebox.showerror("错误", f"无法打开文件夹：{str(e)}")
+
+    def menu_copy_path(self):
+        path = self._get_current_path()
+        if path:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(path)
+            self.root.update()
+            self.status_var.set(f"已复制路径: {path}")
+
+    # =========================================================
+    # 统计与对比功能
+    # =========================================================
+
+    def _format_time(self, seconds):
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def calc_total_duration(self):
+        items = self.tree.get_children()
+        if not items and self.original_total_seconds == 0:
+            return messagebox.showwarning("提示", "请先扫描文件！")
+        
+        self.status_var.set("正在计算剩余时长...")
+        self._set_ui_state_busy(is_ai_running=False)
+        self.progress['mode'] = 'determinate'
+        self.progress['maximum'] = len(items)
+        self.progress['value'] = 0
+        
+        threading.Thread(target=self._calc_compare_thread, args=(items,), daemon=True).start()
+
+    def _calc_compare_thread(self, items):
+        current_total_seconds = 0
+        for i, iid in enumerate(items):
+            if self.stop_flag: break
+            path = self.tree.item(iid, 'values')[4]
+            duration = self.video_processor.get_duration(path)
+            current_total_seconds += duration
+            self.root.after(0, lambda v=i+1: self.progress.configure(value=v))
+        
+        self.root.after(0, lambda: self._show_compare_popup(current_total_seconds))
+        self.root.after(0, self._set_ui_state_idle)
+        self.root.after(0, lambda: self.status_var.set("统计完成"))
+
+    def _show_compare_popup(self, current_seconds):
+        orig_str = self._format_time(self.original_total_seconds)
+        curr_str = self._format_time(current_seconds)
+        copy_text = f"[{self.scan_root_folder_name}] 原时长 {orig_str} -> 修改后 {curr_str}"
+        
+        top = tk.Toplevel(self.root)
+        top.title("时长统计与对比")
+        top.geometry("480x220")
+        top.resizable(False, False)
+        
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 240
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 110
+        top.geometry(f"+{x}+{y}")
+
+        frame_info = tk.Frame(top, pady=15)
+        frame_info.pack()
+        
+        tk.Label(frame_info, text="原始总时长:", fg="gray", font=("Arial", 10)).grid(row=0, column=0, sticky="e", padx=5)
+        tk.Label(frame_info, text=orig_str, font=("Arial", 11, "bold")).grid(row=0, column=1, sticky="w")
+        
+        tk.Label(frame_info, text="当前总时长:", fg="gray", font=("Arial", 10)).grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        tk.Label(frame_info, text=curr_str, fg="#2E7D32", font=("Arial", 11, "bold")).grid(row=1, column=1, sticky="w", pady=5)
+
+        ttk.Separator(top, orient='horizontal').pack(fill='x', padx=20, pady=5)
+
+        tk.Label(top, text="复制内容预览：", font=("Arial", 9)).pack(anchor="w", padx=25)
+        entry = tk.Entry(top, font=("Consolas", 10), justify="center", width=50, bd=1, relief="solid")
+        entry.insert(0, copy_text)
+        entry.configure(state="readonly", readonlybackground="white", fg="#333")
+        entry.pack(pady=5)
+
+        btn_frame = tk.Frame(top, pady=10)
+        btn_frame.pack()
+        
+        def copy_action():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(copy_text)
+            self.root.update()
+            btn_copy.config(text="已复制!", bg="#4CAF50")
+            top.after(1000, lambda: btn_copy.config(text="复制结果", bg="#2196F3"))
+
+        btn_copy = tk.Button(btn_frame, text="复制结果", command=copy_action, bg="#2196F3", fg="white", width=15, font=("bold", 10))
+        btn_copy.pack(side=tk.LEFT, padx=10)
+        
+        tk.Button(btn_frame, text="关闭", command=top.destroy, width=10).pack(side=tk.LEFT, padx=10)
 
 if __name__ == "__main__":
     try:
