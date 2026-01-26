@@ -1,5 +1,13 @@
 import os
 import sys
+import shutil
+import threading
+import tkinter as tk
+from tkinter import filedialog, ttk, messagebox
+from PIL import Image, ImageTk
+import cv2
+import time
+import numpy as np
 
 # =========================================================================
 # 0. 核心环境引导 (必须放在 import torch 之前)
@@ -33,21 +41,14 @@ def force_load_internal_cuda():
         # 同时修改 PATH 环境变量 (双重保险)
         os.environ['PATH'] = ';'.join(paths_to_add) + ';' + os.environ['PATH']
 
-# 执行环境修复 (仅在打包环境中生效，或显式调用)
+# 执行环境修复
 if getattr(sys, 'frozen', False):
     force_load_internal_cuda()
 
 # =========================================================================
-# 正常导入其他库
+# 延迟导入 Torch (确保环境已修复)
 # =========================================================================
-import shutil
-import threading
-import tkinter as tk
-from tkinter import filedialog, ttk, messagebox
-from PIL import Image, ImageTk
-import cv2
-import torch # 必须在 force_load_internal_cuda 之后导入
-import time
+import torch 
 
 # =========================================================================
 # 常量定义
@@ -65,7 +66,14 @@ class YoloDetector:
         self.device = 'cpu'
         self.gpu_info = "正在初始化..."
         
-        self.model_dir = "models"
+        # 【优化 1】使用绝对路径，确保打包或跨盘运行时能找到 models
+        if getattr(sys, 'frozen', False):
+            base_path = os.path.dirname(os.path.abspath(sys.argv[0]))
+        else:
+            base_path = os.path.dirname(os.path.abspath(__file__))
+            
+        self.model_dir = os.path.join(base_path, "models")
+
         if not os.path.exists(self.model_dir):
             os.makedirs(self.model_dir)
             
@@ -85,15 +93,16 @@ class YoloDetector:
             self.gpu_info = f"⚠️ 环境异常: {str(e)}"
 
     def get_model_classes(self, model_name):
-        path = os.path.join(self.model_dir, model_name)
-        if not os.path.exists(path): path = model_name
+        # 支持递归查找的完整路径加载
+        full_path = os.path.join(self.model_dir, model_name)
+        if not os.path.exists(full_path): full_path = model_name # 容错
         
         if model_name in self.models:
             return self.models[model_name].names
         
         try:
             from ultralytics import YOLO
-            temp_model = YOLO(path)
+            temp_model = YOLO(full_path)
             return temp_model.names
         except Exception:
             return {}
@@ -104,19 +113,22 @@ class YoloDetector:
             current_keys = set(self.models.keys())
             target_keys = set(target_model_names)
             
+            # 卸载不再需要的
             for name in (current_keys - target_keys):
                 del self.models[name]
                 print(f"已卸载: {name}")
                 
+            # 加载新增的
             for name in (target_keys - current_keys):
-                path = os.path.join(self.model_dir, name)
-                if not os.path.exists(path): path = name
-                if os.path.exists(path):
-                    model = YOLO(path)
+                full_path = os.path.join(self.model_dir, name)
+                if not os.path.exists(full_path): full_path = name
+                
+                if os.path.exists(full_path):
+                    model = YOLO(full_path)
                     self.models[name] = model
                     print(f"已加载: {name}")
                 else:
-                    print(f"❌ 找不到: {name}")
+                    print(f"❌ 找不到: {name} (路径: {full_path})")
 
             if self.models:
                 return True, f"{self.gpu_info} | 加载: {len(self.models)}"
@@ -139,13 +151,14 @@ class YoloDetector:
                 if selected_ids is not None:
                     target_classes = selected_ids
             
+            # 推理
             results = model(frame, device=self.device, verbose=False, conf=conf_threshold, classes=target_classes)
             
             if results:
                 r = results[0]
                 if (len(r.boxes) > 0 or 
-                   (r.keypoints is not None and len(r.keypoints.conf) > 0) or
-                   (r.masks is not None)):
+                    (r.keypoints is not None and len(r.keypoints.conf) > 0) or
+                    (r.masks is not None)):
                     
                     has_target = True
                     if draw:
@@ -210,52 +223,91 @@ class VideoProcessor:
         except:
             return 0
 
-    def extract_preview_data(self, filepath, count, target_width, ai_conf, draw_skeleton, class_filters):
+    @staticmethod
+    def calculate_blur_score(frame):
+        try:
+            if frame is None: return 0
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            score = cv2.Laplacian(gray, cv2.CV_64F).var()
+            return score
+        except:
+            return 0
+
+    def extract_preview_data(self, filepath, count, target_width, ai_conf, draw_skeleton, class_filters, use_smart_capture=False, blur_threshold=300, search_range=3):
         cap = cv2.VideoCapture(filepath)
         if not cap.isOpened(): return [], 0.0
         
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        indices = []
-        for i in range(count):
-            if count > 1: idx = int(total_frames * i / (count - 1))
-            else: idx = total_frames // 2
-            indices.append(min(idx, total_frames - 1))
+        # 【优化 3】增加 try...finally 确保资源释放
+        try:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            indices = []
+            for i in range(count):
+                if count > 1: idx = int(total_frames * i / (count - 1))
+                else: idx = total_frames // 2
+                indices.append(min(idx, total_frames - 1))
 
-        frames_data = []
-        target_detected_count = 0
+            frames_data = []
+            target_detected_count = 0
 
-        for i, idx in enumerate(indices):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ret, frame = cap.read()
-            if not ret: continue
+            for i, idx in enumerate(indices):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                final_frame = None
+                
+                # === 智能防抖/清晰帧优选逻辑 ===
+                if use_smart_capture:
+                    best_score = -1
+                    try: max_search = int(search_range)
+                    except: max_search = 3
+                    
+                    for _ in range(max_search):
+                        ret, temp_frame = cap.read()
+                        if not ret: break
+                        
+                        score = self.calculate_blur_score(temp_frame)
+                        
+                        if score > best_score:
+                            best_score = score
+                            final_frame = temp_frame
+                        
+                        if score > blur_threshold: 
+                            break
+                else:
+                    ret, final_frame = cap.read()
+                    if not ret: final_frame = None
 
-            has_target, annotated_frame = self.detector.process_frame(
-                frame, conf_threshold=ai_conf, draw=draw_skeleton, class_filters=class_filters
-            )
+                if final_frame is None: continue
+
+                # === AI 识别流程 ===
+                has_target, annotated_frame = self.detector.process_frame(
+                    final_frame, conf_threshold=ai_conf, draw=draw_skeleton, class_filters=class_filters
+                )
+                
+                if has_target: target_detected_count += 1
+                
+                h, w = annotated_frame.shape[:2]
+                scale = 800 / w if w > 800 else 1
+                if scale != 1:
+                    annotated_frame = cv2.resize(annotated_frame, (int(w*scale), int(h*scale)))
+                
+                img_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                img_pil = Image.fromarray(img_rgb)
+                
+                time_sec = idx / fps if fps else 0
+                time_str = f"{int(time_sec//60):02d}:{int(time_sec%60):02d}"
+                
+                frames_data.append({
+                    "label": f"第{i+1}帧",
+                    "time": time_str,
+                    "pil_img": img_pil,
+                    "has_target": has_target
+                })
             
-            if has_target: target_detected_count += 1
+            ratio = (target_detected_count / len(frames_data)) * 100 if frames_data else 0.0
+            return frames_data, ratio
             
-            h, w = annotated_frame.shape[:2]
-            scale = 800 / w if w > 800 else 1
-            if scale != 1:
-                annotated_frame = cv2.resize(annotated_frame, (int(w*scale), int(h*scale)))
-            
-            img_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-            img_pil = Image.fromarray(img_rgb)
-            
-            time_sec = idx / fps if fps else 0
-            time_str = f"{int(time_sec//60):02d}:{int(time_sec%60):02d}"
-            
-            frames_data.append({
-                "label": f"第{i+1}帧",
-                "time": time_str,
-                "pil_img": img_pil,
-                "has_target": has_target
-            })
-        cap.release()
-        ratio = (target_detected_count / len(frames_data)) * 100 if frames_data else 0.0
-        return frames_data, ratio
+        finally:
+            cap.release()
 
 # =========================================================================
 # 模块 3: 全功能 UI
@@ -264,8 +316,12 @@ class VideoProcessor:
 class UnifiedApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("智能视频筛选器 v1.2.0")
+        self.root.title("智能视频筛选器 v1.3.0")
         self.root.geometry("1400x950")
+        self.root.minsize(1200, 800)
+        
+        # 【优化 2】初始化 Resize 定时器变量
+        self._resize_timer = None
         
         self.current_filepath = None
         self.checkbox_vars = {}
@@ -294,8 +350,18 @@ class UnifiedApp:
         self.preview_canvas.bind("<Configure>", self._on_window_resize)
 
     def _initial_scan(self):
-        if not os.path.exists("models"): os.makedirs("models")
-        files = [f for f in os.listdir("models") if f.endswith(".pt")]
+        # 使用 detector 中定义的绝对路径，并递归扫描
+        if not os.path.exists(self.detector.model_dir): 
+            os.makedirs(self.detector.model_dir)
+        
+        files = []
+        # 递归扫描逻辑
+        for root, dirs, filenames in os.walk(self.detector.model_dir):
+            for filename in filenames:
+                if filename.lower().endswith(".pt"):
+                    rel_path = os.path.relpath(os.path.join(root, filename), self.detector.model_dir)
+                    files.append(rel_path)
+
         if files:
             self.selected_models.add(files[0])
             self.status_var.set(f"默认选中: {files[0]} (点击管理按钮加载)")
@@ -304,37 +370,9 @@ class UnifiedApp:
 
     def _configure_styles(self):
         style = ttk.Style()
-        
-        # =========================================================
-        # 1. 核心：不强行设置主题，使用系统默认 (Windows Native)
-        # =========================================================
-        
-        # =========================================================
-        # 2. 列表主体设置 (只调字号和行高)
-        # =========================================================
-        style.configure("Treeview", 
-                        font=("Microsoft YaHei UI", 10), 
-                        rowheight=32
-                        )
-        
-        # =========================================================
-        # 3. 表头设置 (原生质感)
-        # =========================================================
-        style.configure("Treeview.Heading", 
-                        font=("Microsoft YaHei UI", 10)
-                        )
-        
-        # =========================================================
-        # 4. 选中与交互颜色 (保持选中不反色)
-        # =========================================================
-        style.map("Treeview", 
-                  background=[("selected", "#CCE8FF")], # 选中依然是浅蓝
-                  foreground=[("selected", "black")]    # 选中文字依然是黑
-                  )
-
-        # =========================================================
-        # 5. 行颜色 Tag
-        # =========================================================
+        style.configure("Treeview", font=("Microsoft YaHei UI", 10), rowheight=32)
+        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 10))
+        style.map("Treeview", background=[("selected", "#CCE8FF")], foreground=[("selected", "black")])
         self.tree.tag_configure('checked_item', background='#E3F2FD', foreground='black', font=("Microsoft YaHei UI", 10))
         self.tree.tag_configure('normal_item', background='white', foreground='black', font=("Microsoft YaHei UI", 10))
 
@@ -387,7 +425,22 @@ class UnifiedApp:
         self.draw_labels_var = tk.BooleanVar(value=True)
         self.chk_draw = tk.Checkbutton(f_row3, text="显示识别框", variable=self.draw_labels_var)
         self.chk_draw.pack(side=tk.LEFT)
-        tk.Frame(f_row3, width=20).pack(side=tk.LEFT)
+        
+        tk.Frame(f_row3, width=15).pack(side=tk.LEFT) 
+        
+        # 智能防抖开关 & 设置按钮
+        self.smart_capture_var = tk.BooleanVar(value=False)
+        self.blur_threshold_var = tk.IntVar(value=300) 
+        self.smart_search_range_var = tk.IntVar(value=3)
+        
+        self.chk_smart = tk.Checkbutton(f_row3, text="智能防抖", variable=self.smart_capture_var, fg="#00695C", font=("bold", 9))
+        self.chk_smart.pack(side=tk.LEFT)
+        
+        self.btn_blur_conf = tk.Button(f_row3, text="⚙️", command=self.open_blur_settings, bg="#E3F2FD", bd=2, relief="raised", width=2)
+        self.btn_blur_conf.pack(side=tk.LEFT, padx=2)
+        
+        tk.Frame(f_row3, width=15).pack(side=tk.LEFT)
+        
         self.btn_start_ai = tk.Button(f_row3, text="▶ 运行", command=self.start_batch_ai_scan, bg="#2196F3", fg="white", font=("Arial", 9, "bold"), width=8)
         self.btn_start_ai.pack(side=tk.LEFT, padx=2)
         self.btn_pause = tk.Button(f_row3, text="⏸", command=self.toggle_pause, state=tk.DISABLED, width=3)
@@ -409,7 +462,6 @@ class UnifiedApp:
         
         self.btn_reselect = tk.Button(f_del1, text="⚡增量筛选", command=self.apply_threshold_selection, bg="#FF9800", fg="white")
         self.btn_reselect.pack(side=tk.LEFT, padx=5)
-        
         self.btn_clear_sel = tk.Button(f_del1, text="❌ 清空", command=self.clear_all_selection, width=6)
         self.btn_clear_sel.pack(side=tk.LEFT, padx=2)
 
@@ -430,44 +482,23 @@ class UnifiedApp:
         self.tree = ttk.Treeview(list_frame, columns=cols, show='headings')
         
         headers = [("选择", 48), ("文件名", 200), ("出现率", 80), ("父文件夹", 120), ("完整路径", 150)]
-        
         self.tree.heading("checkbox", text="选择")
+        self.tree.column("checkbox", width=48, minwidth=48, stretch=False, anchor="center") 
         
-        self.tree.column("checkbox", 
-                         width=48, 
-                         minwidth=48, 
-                         stretch=False, 
-                         anchor="center"
-                         ) 
-# =========================================================
-# 修改区：其他列配置 (增加智能最小宽度锁定)
-# =========================================================
         for col, (txt, w) in zip(cols[1:], headers[1:]):
             self.tree.heading(col, text=txt)
-            
-        # 算法：根据标题字数计算最小宽度
-        # 微软雅黑 10号字，每个汉字大约占用 20px，加上左右边距缓冲
-        # 例如 "父文件夹" (4字) -> minwidth 设为 100px 左右
             min_w_limit = len(txt) * 25 
+            self.tree.column(col, width=w, minwidth=min_w_limit, anchor="center")
             
-            self.tree.column(col, 
-                             width=w, 
-                             minwidth=min_w_limit, # <--- 关键修改：锁定最小宽度
-                             anchor="center"
-                             )
-            
-        # === 滚动条 1: 列表区 (使用 ttk.Scrollbar 保持原生) ===
         scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscroll=scroll.set)
         
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # 事件绑定
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select_preview)
         self.tree.bind("<ButtonRelease-1>", self.on_tree_click_release)
 
-        # 右键菜单
         self.tree_menu = tk.Menu(self.root, tearoff=0)
         self.tree_menu.add_command(label="▶ 播放视频", command=self.menu_play_video)
         self.tree_menu.add_command(label="📂 打开所在文件夹", command=self.menu_open_folder)
@@ -475,36 +506,25 @@ class UnifiedApp:
         self.tree_menu.add_command(label="📋 复制完整路径", command=self.menu_copy_path)
         self.tree.bind("<Button-3>", self.show_context_menu)
         
-        # ------------------------------------------------------------------------
-        # 预览区 (右侧) - 核心修改：标题冻结与滚轮绑定
-        # ------------------------------------------------------------------------
         self.preview_frame = tk.Frame(paned, bg="#eeeeee")
         paned.add(self.preview_frame)
 
-        # 1. 冻结的标题 (放在 Canvas 外部，顶部)
         self.lbl_preview_title = tk.Label(self.preview_frame, text="出现率: --%", font=("Microsoft YaHei UI", 12, "bold"), bg="#eeeeee", pady=10)
         self.lbl_preview_title.pack(side=tk.TOP, fill=tk.X)
 
-        # 2. 滚动区域
         self.preview_canvas = tk.Canvas(self.preview_frame, bg="#eeeeee")
-        
-        # === 滚动条 2: 预览区 ===
         self.preview_scroll = ttk.Scrollbar(self.preview_frame, orient="vertical", command=self.preview_canvas.yview)
-        
         self.preview_content = tk.Frame(self.preview_canvas, bg="#eeeeee")
         self.preview_win = self.preview_canvas.create_window((0,0), anchor="nw", window=self.preview_content)
         self.preview_content.bind("<Configure>", lambda e: self.preview_canvas.configure(scrollregion=self.preview_canvas.bbox("all")))
         
-        # 布局
         self.preview_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.preview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.preview_canvas.configure(yscrollcommand=self.preview_scroll.set)
 
-        # 滚轮事件绑定到主容器
         self.preview_canvas.bind("<MouseWheel>", self._on_preview_mousewheel)
         self.preview_content.bind("<MouseWheel>", self._on_preview_mousewheel)
 
-        # 状态栏
         bottom_bar = tk.Frame(self.root, bd=1, relief=tk.SUNKEN)
         bottom_bar.pack(side=tk.BOTTOM, fill=tk.X)
         self.gpu_status_var = tk.StringVar(value=self.detector.gpu_info)
@@ -515,40 +535,106 @@ class UnifiedApp:
         self.progress = ttk.Progressbar(bottom_bar, mode='determinate')
         self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20)
 
-    # ----------------- 弹窗管理逻辑 -----------------
-
     def _create_scrollable_canvas(self, parent_frame):
-        """通用方法：创建一个带滚动条的 Canvas 区域"""
-        # === 滚动条 3: 弹窗 (保持 ttk.Scrollbar) ===
         scrollbar = ttk.Scrollbar(parent_frame, orient="vertical")
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
         canvas = tk.Canvas(parent_frame, bg="white")
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
         canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.configure(command=canvas.yview)
-        
         scrollable_frame = tk.Frame(canvas, bg="white")
         
         def _on_frame_configure(event):
             canvas.configure(scrollregion=canvas.bbox("all"))
-        
         scrollable_frame.bind("<Configure>", _on_frame_configure)
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         
         def _on_mousewheel(event):
             current = canvas.yview()
-            scroll_unit = int(-1 * (event.delta / 120))
+            # 【优化 4】3倍速滚动
+            scroll_unit = int(-1 * (event.delta / 120)) * 3
             if scroll_unit == 0: return
             if scroll_unit < 0 and current[0] <= 0: return
             if scroll_unit > 0 and current[1] >= 1: return
             canvas.yview_scroll(scroll_unit, "units")
-        
+            
         canvas.bind("<MouseWheel>", _on_mousewheel)
         scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
-        
         return canvas, scrollable_frame, _on_mousewheel
+
+    def open_blur_settings(self):
+        top = tk.Toplevel(self.root)
+        top.title("智能防抖 - 高级设置")
+        top.geometry("650x450") 
+        top.resizable(False, False)
+        
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 325
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 225
+        top.geometry(f"+{x}+{y}")
+
+        tk.Label(top, text="调整下方的参数以优化抓拍效果", font=("Microsoft YaHei UI", 10), fg="#555", pady=10).pack()
+
+        preview_frame = tk.Frame(top, bg="#eee", bd=1, relief="solid")
+        preview_frame.pack(pady=5)
+        self.lbl_blur_preview = tk.Label(preview_frame, bg="white")
+        self.lbl_blur_preview.pack(padx=2, pady=2)
+
+        ctrl_frame = tk.Frame(top, pady=5)
+        ctrl_frame.pack(fill=tk.X, padx=30)
+        tk.Label(ctrl_frame, text="清晰度阈值:").pack(side=tk.LEFT)
+        scale = tk.Scale(ctrl_frame, from_=50, to=1000, orient=tk.HORIZONTAL, 
+                         variable=self.blur_threshold_var, length=280,
+                         command=lambda v: self._update_blur_sample(int(v)))
+        scale.pack(side=tk.LEFT, padx=10)
+        tk.Label(ctrl_frame, textvariable=self.blur_threshold_var, font=("bold", 12), width=5, fg="blue").pack(side=tk.LEFT)
+
+        ttk.Separator(top, orient='horizontal').pack(fill='x', padx=20, pady=10)
+
+        range_frame = tk.Frame(top, pady=5)
+        range_frame.pack(fill=tk.X, padx=30)
+        
+        tk.Label(range_frame, text="往后搜索帧数:").pack(side=tk.LEFT)
+        search_values = [1, 2, 3, 4, 5] 
+        combo_search = ttk.Combobox(range_frame, textvariable=self.smart_search_range_var, values=search_values, width=5, state="readonly")
+        combo_search.pack(side=tk.LEFT, padx=10)
+        
+        tk.Label(range_frame, text="帧数越少速度越快\n帧数越多抓拍越准（会导致速度变慢！）", 
+                 fg="gray", font=("Arial", 9), justify="left").pack(side=tk.LEFT)
+
+        self._update_blur_sample(self.blur_threshold_var.get())
+
+    def _update_blur_sample(self, threshold):
+        w, h = 400, 150
+        img = np.ones((h, w, 3), dtype=np.uint8) * 255
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(img, 'SMART FOCUS', (50, 60), font, 1.2, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.putText(img, 'Preview Text 123', (70, 110), font, 0.8, (80, 80, 80), 2, cv2.LINE_AA)
+        
+        if threshold >= 800: k_size = 1
+        elif threshold >= 500: k_size = 3
+        elif threshold >= 300: k_size = 5
+        elif threshold >= 150: k_size = 9
+        elif threshold >= 80: k_size = 15
+        else: k_size = 21
+        
+        if k_size > 1:
+            img = cv2.GaussianBlur(img, (k_size, k_size), 0)
+            
+        status = "CLEAR (Acceptable)"
+        color = (0, 150, 0)
+        
+        if threshold < 150: 
+            status = "BLURRY (Too Low)"
+            color = (0, 0, 200)
+            
+        cv2.putText(img, status, (10, 25), font, 0.6, color, 1, cv2.LINE_AA)
+        
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img_pil = Image.fromarray(img_rgb)
+        tk_img = ImageTk.PhotoImage(img_pil)
+        
+        self.lbl_blur_preview.configure(image=tk_img)
+        self.lbl_blur_preview.image = tk_img 
 
     def open_model_manager(self):
         top = tk.Toplevel(self.root)
@@ -578,8 +664,15 @@ class UnifiedApp:
         self.temp_class_vars = {} 
         self.current_editing_model = None
         
-        files = [f for f in os.listdir("models") if f.endswith(".pt")]
-        if not files: tk.Label(content_l, text="未找到 .pt 文件").pack(pady=20)
+        # 递归扫描模型文件
+        files = []
+        for root, dirs, filenames in os.walk(self.detector.model_dir):
+            for filename in filenames:
+                if filename.lower().endswith(".pt"):
+                    rel_path = os.path.relpath(os.path.join(root, filename), self.detector.model_dir)
+                    files.append(rel_path)
+
+        if not files: tk.Label(content_l, text=f"未找到 .pt 文件\n({self.detector.model_dir})").pack(pady=20)
         
         for f in files:
             is_checked = f in self.selected_models
@@ -712,29 +805,33 @@ class UnifiedApp:
 
     # ----------------- 响应式布局 & 滚动控制 -----------------
 
+    # 【优化 2】窗口防抖动逻辑
     def _on_window_resize(self, event):
-        self.preview_canvas.itemconfig(self.preview_win, width=event.width)
-        self._reflow_grid(event.width)
+        if self._resize_timer:
+            self.root.after_cancel(self._resize_timer)
+        self._resize_timer = self.root.after(200, lambda: self._perform_resize(event.width))
 
-    # 【新增】统一的滚轮事件处理
+    def _perform_resize(self, width):
+        self.preview_canvas.itemconfig(self.preview_win, width=width)
+        self._reflow_grid(width)
+
+    # 【优化 4】3倍速滚动
     def _on_preview_mousewheel(self, event):
         current = self.preview_canvas.yview()
-        scroll_unit = int(-1 * (event.delta / 120))
+        scroll_unit = int(-1 * (event.delta / 120)) * 3
         if scroll_unit == 0: return
-        if scroll_unit < 0 and current[0] <= 0: return # 顶端禁止上滑
-        if scroll_unit > 0 and current[1] >= 1: return # 底端禁止下滑
+        if scroll_unit < 0 and current[0] <= 0: return 
+        if scroll_unit > 0 and current[1] >= 1: return 
         self.preview_canvas.yview_scroll(scroll_unit, "units")
 
     def _reflow_grid(self, container_width):
         if not self.cached_preview_data: return
         for widget in self.preview_content.winfo_children(): widget.destroy()
 
-        # 更新顶部冻结标签的内容
         self.lbl_preview_title.config(text=f"出现率: {self.cached_ratio:.1f}%")
 
         f_container = tk.Frame(self.preview_content, bg="#eeeeee")
         f_container.pack(fill=tk.X, padx=5)
-        # 绑定容器滚轮
         f_container.bind("<MouseWheel>", self._on_preview_mousewheel)
 
         count = len(self.cached_preview_data)
@@ -755,8 +852,6 @@ class UnifiedApp:
         for i, d in enumerate(self.cached_preview_data):
             f = tk.Frame(f_container, bd=1, relief="solid", padx=2, pady=2, bg="white")
             f.grid(row=i//cols, column=i%cols, padx=5, pady=5, sticky="nsew")
-            
-            # 【新增】为 Frame 绑定滚轮
             f.bind("<MouseWheel>", self._on_preview_mousewheel)
 
             pil_img = d['pil_img']
@@ -768,12 +863,10 @@ class UnifiedApp:
             l = tk.Label(f, image=tk_img, bg="white")
             l.image = tk_img 
             l.pack()
-            # 【新增】为图片绑定滚轮
             l.bind("<MouseWheel>", self._on_preview_mousewheel)
 
             lbl_txt = tk.Label(f, text=f"{d['label']} ({d['time']})", bg="white")
             lbl_txt.pack()
-            # 【新增】为文字绑定滚轮
             lbl_txt.bind("<MouseWheel>", self._on_preview_mousewheel)
             
         for c in range(cols): f_container.grid_columnconfigure(c, weight=1)
@@ -796,6 +889,8 @@ class UnifiedApp:
         self.entry_thresh.config(state=state)
         self.btn_del_files.config(state=state)
         self.btn_del_folders.config(state=state)
+        self.chk_smart.config(state=state) 
+        self.btn_blur_conf.config(state=state)
 
     def _set_ui_state_busy(self, is_ai_running=False):
         self.is_running = True
@@ -875,9 +970,12 @@ class UnifiedApp:
         try: scan_frames = int(self.preview_count_var.get())
         except: scan_frames = 3
         draw_labels = self.draw_labels_var.get()
+        use_smart = self.smart_capture_var.get() 
+        blur_thresh = self.blur_threshold_var.get() 
+        search_range = self.smart_search_range_var.get()
         
         model_str = "\n   - ".join(self.selected_models)
-        if not messagebox.askyesno("确认运行", f"将使用以下模型检测：\n   - {model_str}\n\n标注: {'开启' if draw_labels else '关闭'}"): return
+        if not messagebox.askyesno("确认运行", f"将使用以下模型检测：\n   - {model_str}\n\n标注: {'开启' if draw_labels else '关闭'}\n防抖: {'开启' if use_smart else '关闭'}"): return
 
         self.stop_flag = False
         self.pause_event.set()
@@ -885,9 +983,9 @@ class UnifiedApp:
         self.progress['mode'] = 'determinate'
         self.progress['maximum'] = len(items)
         
-        threading.Thread(target=self._ai_scan_thread, args=(items, scan_frames, draw_labels, list(self.selected_models), self.active_class_filters), daemon=True).start()
+        threading.Thread(target=self._ai_scan_thread, args=(items, scan_frames, draw_labels, list(self.selected_models), self.active_class_filters, use_smart, blur_thresh, search_range), daemon=True).start()
 
-    def _ai_scan_thread(self, items, scan_frames, draw_labels, selected_models, class_filters):
+    def _ai_scan_thread(self, items, scan_frames, draw_labels, selected_models, class_filters, use_smart, blur_thresh, search_range):
         success, msg = self.detector.load_models(selected_models)
         self.root.after(0, lambda: self.gpu_status_var.set(msg))
         
@@ -907,7 +1005,7 @@ class UnifiedApp:
 
             path = self.tree.item(iid, 'values')[4]
             try:
-                _, ratio = self.video_processor.extract_preview_data(path, scan_frames, 100, ai_conf, draw_labels, class_filters)
+                _, ratio = self.video_processor.extract_preview_data(path, scan_frames, 100, ai_conf, draw_labels, class_filters, use_smart_capture=use_smart, blur_threshold=blur_thresh, search_range=search_range)
                 is_waste = ratio < thresh
                 self.root.after(0, lambda id=iid, r=ratio, chk=is_waste: self._update_ai_result(id, r, chk))
             except Exception as e:
@@ -1023,33 +1121,29 @@ class UnifiedApp:
             self.status_var.set("任务继续执行中...")
 
     # =========================================================
-    # 核心修复区：新的点击判定逻辑
+    # 点击判定逻辑
     # =========================================================
     
     def on_tree_click_release(self, event):
         region = self.tree.identify("region", event.x, event.y)
         column = self.tree.identify_column(event.x)
         
-        # 1. 判定表头点击 (Heading)
         if region == "heading":
-            if column == "#1": # 只有点第一列的表头才全选
+            if column == "#1": 
                 all_checked = all(v.get() for v in self.checkbox_vars.values())
-                new_state = not all_checked # 反转状态
+                new_state = not all_checked 
                 for iid, var in self.checkbox_vars.items():
                     var.set(new_state)
                     self.update_checkbox_display(iid)
         
-        # 2. 判定单元格点击 (Cell)
         elif region == "cell":
             row_id = self.tree.identify_row(event.y)
             if not row_id: return
             
-            if column == "#1": # 只有点第一列才切换勾选
+            if column == "#1": 
                 current_val = self.checkbox_vars[row_id].get()
                 self.checkbox_vars[row_id].set(not current_val)
                 self.update_checkbox_display(row_id)
-            else:
-                pass
 
     def update_checkbox_display(self, iid):
         if iid not in self.checkbox_vars: return
@@ -1073,7 +1167,11 @@ class UnifiedApp:
             cnt = int(self.preview_count_var.get())
             ai_conf = self.conf_var.get()
             draw = self.draw_labels_var.get()
-            data, ratio = self.video_processor.extract_preview_data(path, cnt, 400, ai_conf, draw, self.active_class_filters)
+            use_smart = self.smart_capture_var.get() 
+            blur_thresh = self.blur_threshold_var.get()
+            search_range = self.smart_search_range_var.get()
+            
+            data, ratio = self.video_processor.extract_preview_data(path, cnt, 400, ai_conf, draw, self.active_class_filters, use_smart_capture=use_smart, blur_threshold=blur_thresh, search_range=search_range)
             self.cached_preview_data = data
             self.cached_ratio = ratio
             self.root.after(0, lambda: self._render_preview_init())
